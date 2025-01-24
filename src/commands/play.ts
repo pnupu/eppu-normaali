@@ -251,7 +251,11 @@ export async function handleCookies(message: Message, cookiesContent?: string) {
     if (!cookiesContent) {
       // If no content provided, read and show current cookies
       const currentCookies = await fs.promises.readFile(COOKIES_PATH, 'utf-8');
-      message.reply('Current cookies content:\n```\n' + currentCookies + '\n```');
+      // Split into multiple messages if too long
+      const chunks = currentCookies.match(/.{1,1500}/gs) || [];
+      for (let i = 0; i < chunks.length; i++) {
+        await message.reply(`${i === 0 ? 'Current cookies content:' : 'Continued...'}\n\`\`\`\n${chunks[i]}\n\`\`\``);
+      }
       return;
     }
 
@@ -275,7 +279,7 @@ export async function handleCookies(message: Message, cookiesContent?: string) {
 
     // Write new cookies content
     await fs.promises.writeFile(COOKIES_PATH, finalContent);
-    message.reply('Cookies file has been updated successfully! New content:\n```\n' + finalContent + '\n```');
+    await message.reply('Cookies file has been updated successfully! Use `!cookies` to view the current content.');
   } catch (error) {
     console.error('Error handling cookies command:', error);
     message.reply('Error updating cookies file!');
