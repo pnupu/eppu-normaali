@@ -10,7 +10,7 @@ import {
   AudioPlayer,
   VoiceConnectionStatus
 } from '@discordjs/voice';
-import youtubeDl, { Payload } from 'youtube-dl-exec';
+import youtubeDl, { Payload, Flags } from 'youtube-dl-exec';
 import { MusicQueue } from '../music/queue';
 import path from 'path';
 import { spawn } from 'child_process';
@@ -27,6 +27,17 @@ interface ExtendedPayload extends Omit<Payload, 'requested_downloads'> {
 const queues = new Map<string, MusicQueue>();
 const COOKIES_PATH = path.join(__dirname, '../../cookies.txt');
 
+async function getPoToken(): Promise<string> {
+  try {
+    const response = await fetch('http://localhost:8080/token');
+    const data = await response.text();
+    return data.trim();
+  } catch (error) {
+    console.error('Failed to fetch PO token:', error);
+    throw error;
+  }
+}
+
 export async function handlePlay(message: Message, url: string) {
   console.log('Starting handlePlay with URL:', url);
   if (!message.member?.voice.channel) {
@@ -40,12 +51,19 @@ export async function handlePlay(message: Message, url: string) {
   console.log('Queue exists:', !!queue);
 
   try {
-    console.log('Fetching video info from URL');
-    const videoInfo = await youtubeDl(url, {
+    console.log('Fetching PO token');
+    const poToken = await getPoToken();
+    
+    console.log('Fetching video info with token');
+    const flags: Flags = {
       dumpSingleJson: true,
       format: 'bestaudio',
-      cookies: COOKIES_PATH
-    }) as unknown as ExtendedPayload;
+      // cookies: COOKIES_PATH,
+      defaultSearch: 'ytsearch:',
+      addHeader: [`--extractor-args=youtube:player-client=web,default;po_token=web+${poToken}`]
+    };
+
+    const videoInfo = await youtubeDl(url, flags) as unknown as ExtendedPayload;
 
     if (!videoInfo.requested_downloads?.[0]?.url) {
       console.error('No audio URL found in video info');
