@@ -1,6 +1,6 @@
 import { Client, GatewayIntentBits } from 'discord.js';
 import { config } from 'dotenv';
-import { handlePlay } from './commands/play';
+import { handlePlay, handlePause, handleResume, handleSkip, handleQueue } from './commands/play';
 
 config();
 
@@ -20,13 +20,30 @@ client.once('ready', () => {
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
   
-  if (message.content.startsWith('!play')) {
-    const url = message.content.split(' ')[1];
-    if (!url) {
-      message.reply('Please provide a YouTube URL!');
-      return;
-    }
-    await handlePlay(message, url);
+  const args = message.content.split(' ');
+  const command = args[0].toLowerCase();
+
+  switch(command) {
+    case '!play':
+      const url = args[1];
+      if (!url) {
+        message.reply('Please provide a YouTube URL!');
+        return;
+      }
+      await handlePlay(message, url);
+      break;
+    case '!pause':
+      handlePause(message);
+      break;
+    case '!resume':
+      handleResume(message);
+      break;
+    case '!skip':
+      handleSkip(message);
+      break;
+    case '!queue':
+      handleQueue(message);
+      break;
   }
 });
 
