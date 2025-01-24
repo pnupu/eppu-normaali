@@ -36,7 +36,8 @@ export async function handlePlay(message: Message, url: string) {
   try {
     const videoInfo = await youtubeDl(url, {
       dumpSingleJson: true,
-      format: 'bestaudio'
+      format: 'bestaudio',
+      cookies: COOKIES_PATH
     }) as unknown as ExtendedPayload;
 
     console.log(videoInfo.requested_downloads);
