@@ -13,6 +13,8 @@ import {
 import youtubeDl, { Payload } from 'youtube-dl-exec';
 import { MusicQueue } from '../music/queue';
 import path from 'path';
+import { spawn } from 'child_process';
+import { Readable } from 'stream';
 
 interface ExtendedRequestedDownload {
   url: string;
@@ -117,14 +119,37 @@ export async function handlePlay(message: Message, url: string) {
   }
 }
 
+function createFfmpegStream(url: string): Readable {
+  const ffmpeg = spawn('ffmpeg', [
+    '-reconnect', '1',
+    '-reconnect_streamed', '1',
+    '-reconnect_delay_max', '5',
+    '-i', url,
+    '-f', 's16le',
+    '-ar', '48000',
+    '-ac', '2',
+    '-loglevel', 'error',
+    'pipe:1'
+  ]);
+
+  ffmpeg.stderr.on('data', data => {
+    console.error(`FFmpeg stderr: ${data}`);
+  });
+
+  return ffmpeg.stdout;
+}
+
 async function playSong(url: string, player: AudioPlayer, message: Message, title: string) {
   try {
-    console.log('Creating audio resource for URL:', url);
-    const resource = createAudioResource(url, {
-      inputType: StreamType.Arbitrary,
-    });
+    console.log('Creating FFmpeg stream for URL:', url);
+    const stream = createFfmpegStream(url);
     
-    console.log('Playing audio resource');
+    const resource = createAudioResource(stream, {
+      inputType: StreamType.Raw,
+      inlineVolume: true
+    });
+
+    resource.volume?.setVolume(1);
     player.play(resource);
     message.reply(`Now playing: ${title}`);
   } catch (error) {
