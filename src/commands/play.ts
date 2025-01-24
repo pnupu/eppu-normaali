@@ -59,8 +59,7 @@ export async function handlePlay(message: Message, url: string) {
       dumpSingleJson: true,
       format: 'bestaudio',
       // cookies: COOKIES_PATH,
-      defaultSearch: 'ytsearch:',
-      addHeader: [`--extractor-args=youtube:player-client=web,default;po_token=web+${poToken}`]
+      addHeader: [`extractor-args:youtube:player-client=web,default;po_token=web+${poToken}`]
     };
 
     const videoInfo = await youtubeDl(url, flags) as unknown as ExtendedPayload;
