@@ -255,8 +255,14 @@ export async function handleCookies(message: Message, cookiesContent?: string) {
       return;
     }
 
+    // Filter out comment lines and empty lines
+    const filteredContent = cookiesContent
+      .split('\n')
+      .filter(line => line.trim() && !line.trim().startsWith('#'))
+      .join('\n');
+
     // Write new cookies content
-    await fs.promises.writeFile(COOKIES_PATH, cookiesContent);
+    await fs.promises.writeFile(COOKIES_PATH, filteredContent);
     message.reply('Cookies file has been updated successfully!');
   } catch (error) {
     console.error('Error handling cookies command:', error);
