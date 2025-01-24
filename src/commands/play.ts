@@ -11,6 +11,7 @@ import {
 } from '@discordjs/voice';
 import youtubeDl, { Payload } from 'youtube-dl-exec';
 import { MusicQueue } from '../music/queue';
+import path from 'path';
 
 interface ExtendedRequestedDownload {
   url: string;
@@ -21,6 +22,7 @@ interface ExtendedPayload extends Omit<Payload, 'requested_downloads'> {
 }
 
 const queues = new Map<string, MusicQueue>();
+const COOKIES_PATH = path.join(__dirname, '../../cookies.txt');
 
 export async function handlePlay(message: Message, url: string) {
   if (!message.member?.voice.channel) {
