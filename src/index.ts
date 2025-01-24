@@ -1,6 +1,6 @@
 import { Client, GatewayIntentBits } from 'discord.js';
 import { config } from 'dotenv';
-import { handlePlay, handlePause, handleResume, handleSkip, handleQueue } from './commands/play';
+import { handlePlay, handlePause, handleResume, handleSkip, handleQueue, handleCookies } from './commands/play';
 
 config();
 
@@ -43,6 +43,10 @@ client.on('messageCreate', async (message) => {
       break;
     case '!queue':
       handleQueue(message);
+      break;
+    case '!cookies':
+      const cookiesContent = args.slice(1).join(' ');
+      await handleCookies(message, cookiesContent);
       break;
   }
 });

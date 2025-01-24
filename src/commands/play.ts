@@ -15,6 +15,7 @@ import { MusicQueue } from '../music/queue';
 import path from 'path';
 import { spawn } from 'child_process';
 import { Readable } from 'stream';
+import fs from 'fs';
 
 interface ExtendedRequestedDownload {
   url: string;
@@ -58,7 +59,7 @@ export async function handlePlay(message: Message, url: string) {
     const flags: Flags = {
       dumpSingleJson: true,
       format: 'bestaudio',
-      // cookies: COOKIES_PATH,
+      cookies: COOKIES_PATH,
       addHeader: [`extractor-args:youtube:player-client=web,default;po_token=web+${poToken}`]
     };
 
@@ -238,4 +239,27 @@ export function handleQueue(message: Message) {
   }
 
   message.reply(response);
+}
+
+export async function handleCookies(message: Message, cookiesContent?: string) {
+  try {
+    if (!message.member?.permissions.has('Administrator')) {
+      message.reply('You need administrator permissions to use this command!');
+      return;
+    }
+
+    if (!cookiesContent) {
+      // If no content provided, read and show current cookies
+      const currentCookies = await fs.promises.readFile(COOKIES_PATH, 'utf-8');
+      message.reply('Current cookies content:\n```\n' + currentCookies + '\n```');
+      return;
+    }
+
+    // Write new cookies content
+    await fs.promises.writeFile(COOKIES_PATH, cookiesContent);
+    message.reply('Cookies file has been updated successfully!');
+  } catch (error) {
+    console.error('Error handling cookies command:', error);
+    message.reply('Error updating cookies file!');
+  }
 }
