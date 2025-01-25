@@ -53,14 +53,12 @@ export async function handlePlay(message: Message, url: string) {
 
   try {
     console.log('Fetching PO token');
-    const poToken = await getPoToken();
     
     console.log('Fetching video info with token');
     const flags: Flags = {
       dumpSingleJson: true,
       format: 'bestaudio',
       cookies: COOKIES_PATH,
-      addHeader: [`extractor-args:youtube:player-client=web,default;po_token=web+${poToken}`]
     };
 
     const videoInfo = await youtubeDl(url, flags) as unknown as ExtendedPayload;
@@ -239,6 +237,20 @@ export function handleQueue(message: Message) {
   }
 
   message.reply(response);
+}
+
+export function handleEmbed(message: Message) {
+  const embed = {
+    color: 0x0099ff,
+    title: 'Embedded YouTube Video',
+    url: 'https://www.youtube.com/embed/aqz-KE-bpKQ',
+    description: 'Click the title to watch the video!',
+    thumbnail: {
+      url: 'https://img.youtube.com/vi/aqz-KE-bpKQ/maxresdefault.jpg',
+    },
+  };
+
+  message.reply({ embeds: [embed] });
 }
 
 export async function handleCookies(message: Message, cookiesContent?: string) {
