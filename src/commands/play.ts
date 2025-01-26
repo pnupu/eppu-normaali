@@ -253,6 +253,40 @@ export function handleEmbed(message: Message) {
   message.reply({ embeds: [embed] });
 }
 
+export function handleReset(message: Message) {
+  if (!message.member?.permissions.has('Administrator')) {
+    message.reply('You need administrator permissions to use this command!');
+    return;
+  }
+
+  // Check all guilds where the bot is in voice channels
+  message.client.guilds.cache.forEach(guild => {
+    const queue = queues.get(guild.id);
+    if (queue) {
+      // Stop the player and clear the queue
+      const player = queue.getPlayer();
+      player.stop();
+      queues.delete(guild.id);
+    }
+
+    // Check if bot is in a voice channel
+    const me = guild.members.cache.get(message.client.user!.id);
+    if (me?.voice.channel) {
+      const channel = me.voice.channel;
+      // Count members that aren't bots
+      const humanMembers = channel.members.filter(member => !member.user.bot).size;
+      
+      if (humanMembers === 0) {
+        // Only bots in channel, disconnect
+        me.voice.disconnect();
+        console.log(`Left empty voice channel in guild: ${guild.name}`);
+      }
+    }
+  });
+
+  message.reply('Bot has been reset and left empty voice channels!');
+}
+
 export async function handleCookies(message: Message, cookiesContent?: string) {
   try {
     if (!message.member?.permissions.has('Administrator')) {

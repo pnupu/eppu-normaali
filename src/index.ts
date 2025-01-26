@@ -1,6 +1,6 @@
 import { Client, GatewayIntentBits } from 'discord.js';
 import { config } from 'dotenv';
-import { handlePlay, handlePause, handleResume, handleSkip, handleQueue, handleCookies, handleEmbed } from './commands/play';
+import { handlePlay, handlePause, handleResume, handleSkip, handleQueue, handleCookies, handleEmbed, handleReset } from './commands/play';
 
 config();
 
@@ -50,6 +50,9 @@ client.on('messageCreate', async (message) => {
       break;
     case '!embed':
       handleEmbed(message);
+      break;
+    case '!reset':
+      handleReset(message);
       break;
   }
 });
