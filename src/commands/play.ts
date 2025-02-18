@@ -107,6 +107,16 @@ export async function handlePlay(message: Message, url: string) {
         const nextSong = queue!.getNextSong();
         if (nextSong) {
           playSong(nextSong.url, queue!.getPlayer(), message, nextSong.title);
+        } else {
+          // No more songs in queue, check if we should disconnect
+          const channel = message.guild!.members.cache.get(message.client.user!.id)?.voice.channel;
+          if (channel) {
+            const humanMembers = channel.members.filter(member => !member.user.bot).size;
+            if (humanMembers === 0) {
+              connection.destroy();
+              queues.delete(guildId);
+            }
+          }
         }
       });
     }
@@ -118,15 +128,13 @@ export async function handlePlay(message: Message, url: string) {
       requestedBy: message.author.username
     };
 
-    if (queue.getCurrentSong()) {
-      queue.addSong(queueItem);
-      message.reply(`Added to queue: ${videoInfo.title}`);
+    queue.addSong(queueItem);
+    
+    // If this is the current song (no other song playing), start playing
+    if (queue.getCurrentSong()?.url === queueItem.url) {
+      playSong(queueItem.url, queue.getPlayer(), message, queueItem.title);
     } else {
-      queue.addSong(queueItem);
-      const nextSong = queue.getNextSong();
-      if (nextSong) {
-        playSong(nextSong.url, queue.getPlayer(), message, nextSong.title);
-      }
+      message.reply(`Added to queue: ${videoInfo.title}`);
     }
 
   } catch (error) {

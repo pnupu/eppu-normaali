@@ -19,6 +19,10 @@ export class MusicQueue {
 
   addSong(song: QueueItem) {
     this.queue.push(song);
+    // If there's no current song, this is the first song
+    if (!this.currentSong) {
+      this.currentSong = this.queue.shift() || null;
+    }
   }
 
   getCurrentSong(): QueueItem | null {
@@ -26,7 +30,7 @@ export class MusicQueue {
   }
 
   getNextSong(): QueueItem | null {
-    if (this.queue.length === 0) return null;
+    // Set current song to the next in queue
     this.currentSong = this.queue.shift() || null;
     return this.currentSong;
   }
@@ -65,5 +69,9 @@ export class MusicQueue {
 
   getPlayer(): AudioPlayer {
     return this.player;
+  }
+
+  hasNextSong(): boolean {
+    return this.queue.length > 0;
   }
 }
