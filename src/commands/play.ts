@@ -8,7 +8,8 @@ import {
   StreamType,
   AudioPlayerStatus,
   AudioPlayer,
-  VoiceConnectionStatus
+  VoiceConnectionStatus,
+  getVoiceConnection
 } from '@discordjs/voice';
 import youtubeDl, { Payload, Flags } from 'youtube-dl-exec';
 import { MusicQueue } from '../music/queue';
@@ -156,11 +157,25 @@ function createFfmpegStream(url: string): Readable {
     'pipe:1'
   ]);
 
-  ffmpeg.stderr.on('data', data => {
-    console.error(`FFmpeg stderr: ${data}`);
+  // Handle process errors
+  ffmpeg.on('error', error => {
+    console.error('FFmpeg process error:', error);
   });
 
-  return ffmpeg.stdout;
+  // Handle process exit
+  ffmpeg.on('exit', (code, signal) => {
+    if (code !== 0) {
+      console.log(`FFmpeg process exited with code ${code} and signal ${signal}`);
+    }
+  });
+
+  // Handle stdout errors
+  const stdout = ffmpeg.stdout;
+  stdout.on('error', error => {
+    console.error('FFmpeg stdout error:', error);
+  });
+
+  return stdout;
 }
 
 async function playSong(url: string, player: AudioPlayer, message: Message, title: string) {
@@ -267,32 +282,36 @@ export function handleReset(message: Message) {
     return;
   }
 
-  // Check all guilds where the bot is in voice channels
-  message.client.guilds.cache.forEach(guild => {
-    const queue = queues.get(guild.id);
-    if (queue) {
-      // Stop the player and clear the queue
-      const player = queue.getPlayer();
-      player.stop();
-      queues.delete(guild.id);
-    }
-
-    // Check if bot is in a voice channel
-    const me = guild.members.cache.get(message.client.user!.id);
-    if (me?.voice.channel) {
-      const channel = me.voice.channel;
-      // Count members that aren't bots
-      const humanMembers = channel.members.filter(member => !member.user.bot).size;
-      
-      if (humanMembers === 0) {
-        // Only bots in channel, disconnect
-        me.voice.disconnect();
-        console.log(`Left empty voice channel in guild: ${guild.name}`);
+  try {
+    // Check all guilds where the bot is in voice channels
+    message.client.guilds.cache.forEach(guild => {
+      const queue = queues.get(guild.id);
+      if (queue) {
+        // Stop the player and clear the queue
+        const player = queue.getPlayer();
+        player.stop();
+        queues.delete(guild.id);
       }
-    }
-  });
 
-  message.reply('Bot has been reset and left empty voice channels!');
+      // Check if bot is in a voice channel
+      const me = guild.members.cache.get(message.client.user!.id);
+      if (me?.voice.channel) {
+        // Force disconnect from voice channel
+        const connection = getVoiceConnection(guild.id);
+        if (connection) {
+          connection.destroy();
+          console.log(`Destroyed connection in guild: ${guild.name}`);
+        }
+        me.voice.disconnect();
+        console.log(`Left voice channel in guild: ${guild.name}`);
+      }
+    });
+
+    message.reply('Bot has been reset and disconnected from all voice channels!');
+  } catch (error) {
+    console.error('Reset command error:', error);
+    message.reply('Error during reset!');
+  }
 }
 
 export async function handleCookies(message: Message, cookiesContent?: string) {
