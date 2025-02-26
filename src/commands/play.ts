@@ -26,6 +26,12 @@ interface ExtendedPayload extends Omit<Payload, 'requested_downloads'> {
   requested_downloads: ExtendedRequestedDownload[];
 }
 
+interface PlaylistEntry {
+  title: string;
+  url: string;
+  id: string;
+}
+
 const queues = new Map<string, MusicQueue>();
 const COOKIES_PATH = path.join(__dirname, '../../cookies.txt');
 
@@ -55,6 +61,15 @@ export async function handlePlay(message: Message, url: string) {
   try {
     console.log('Fetching PO token');
     
+    // Check if URL is a playlist
+    const isPlaylist = url.includes('playlist') || url.includes('list=');
+    
+    if (isPlaylist) {
+      await handlePlaylist(message, url, queue);
+      return;
+    }
+    
+    // Handle single video
     console.log('Fetching video info with token');
     const flags: Flags = {
       dumpSingleJson: true,
@@ -70,56 +85,7 @@ export async function handlePlay(message: Message, url: string) {
     }
 
     if (!queue) {
-      console.log('Creating new voice connection and queue');
-      const connection = joinVoiceChannel({
-        channelId: message.member.voice.channel.id,
-        guildId: guildId,
-        adapterCreator: message.guild!.voiceAdapterCreator as DiscordGatewayAdapterCreator,
-      });
-
-      connection.on('stateChange', (oldState, newState) => {
-        console.log(`Connection state changed from ${oldState.status} to ${newState.status}`);
-      });
-
-      connection.on(VoiceConnectionStatus.Disconnected, async (oldState, newState) => {
-        console.log('Voice Connection Disconnected:', oldState, newState);
-      });
-
-      connection.on('error', error => {
-        console.error('Voice Connection Error:', error);
-      });
-
-      const player = createAudioPlayer();
-      
-      player.on('error', error => {
-        console.error('Audio Player Error:', error);
-      });
-
-      player.on('stateChange', (oldState, newState) => {
-        console.log(`Audio player state changed from ${oldState.status} to ${newState.status}`);
-      });
-
-      queue = new MusicQueue(player);
-      queues.set(guildId, queue);
-      
-      connection.subscribe(player);
-
-      player.on(AudioPlayerStatus.Idle, () => {
-        const nextSong = queue!.getNextSong();
-        if (nextSong) {
-          playSong(nextSong.url, queue!.getPlayer(), message, nextSong.title);
-        } else {
-          // No more songs in queue, check if we should disconnect
-          const channel = message.guild!.members.cache.get(message.client.user!.id)?.voice.channel;
-          if (channel) {
-            const humanMembers = channel.members.filter(member => !member.user.bot).size;
-            if (humanMembers === 0) {
-              connection.destroy();
-              queues.delete(guildId);
-            }
-          }
-        }
-      });
+      queue = await createQueueAndConnection(message);
     }
 
     console.log('Adding song to queue:', videoInfo.title);
@@ -142,6 +108,141 @@ export async function handlePlay(message: Message, url: string) {
     console.error('Play command error:', error);
     message.reply('Error playing the video!');
   }
+}
+
+async function handlePlaylist(message: Message, url: string, existingQueue?: MusicQueue) {
+  try {
+    message.reply('Processing playlist. This may take a moment...');
+    
+    // Get playlist info
+    const playlistFlags: Flags = {
+      dumpSingleJson: true,
+      flatPlaylist: true,
+      cookies: COOKIES_PATH,
+    };
+    
+    const playlistInfo = await youtubeDl(url, playlistFlags) as any;
+    
+    if (!playlistInfo || !playlistInfo.entries || !Array.isArray(playlistInfo.entries)) {
+      throw new Error('Failed to get playlist information');
+    }
+    
+    const entries = playlistInfo.entries as PlaylistEntry[];
+    
+    if (entries.length === 0) {
+      message.reply('No videos found in the playlist.');
+      return;
+    }
+    
+    // Create queue if it doesn't exist
+    const guildId = message.guild!.id;
+    let queue = existingQueue || queues.get(guildId);
+    
+    if (!queue) {
+      queue = await createQueueAndConnection(message);
+    }
+    
+    // Process each video in the playlist
+    let addedCount = 0;
+    const totalVideos = entries.length;
+    
+    message.reply(`Found ${totalVideos} videos in the playlist. Adding to queue...`);
+    
+    // Get audio URLs for each video and add to queue
+    for (const entry of entries) {
+      try {
+        const videoFlags: Flags = {
+          dumpSingleJson: true,
+          format: 'bestaudio',
+          cookies: COOKIES_PATH,
+        };
+        
+        const videoInfo = await youtubeDl(entry.url, videoFlags) as unknown as ExtendedPayload;
+        
+        if (videoInfo.requested_downloads?.[0]?.url) {
+          const queueItem = {
+            title: videoInfo.title,
+            url: videoInfo.requested_downloads[0].url,
+            requestedBy: message.author.username
+          };
+          
+          queue.addSong(queueItem);
+          addedCount++;
+          
+          // Start playing the first song if it's the current song
+          if (queue.getCurrentSong()?.url === queueItem.url) {
+            playSong(queueItem.url, queue.getPlayer(), message, queueItem.title);
+          }
+        }
+      } catch (error) {
+        console.error(`Error processing playlist video ${entry.url}:`, error);
+        // Continue with next video even if one fails
+      }
+    }
+    
+    message.reply(`Successfully added ${addedCount} out of ${totalVideos} videos from the playlist to the queue.`);
+    
+  } catch (error) {
+    console.error('Playlist processing error:', error);
+    message.reply('Error processing the playlist!');
+  }
+}
+
+async function createQueueAndConnection(message: Message): Promise<MusicQueue> {
+  console.log('Creating new voice connection and queue');
+  const guildId = message.guild!.id;
+  
+  const connection = joinVoiceChannel({
+    channelId: message.member!.voice.channel!.id,
+    guildId: guildId,
+    adapterCreator: message.guild!.voiceAdapterCreator as DiscordGatewayAdapterCreator,
+  });
+
+  connection.on('stateChange', (oldState, newState) => {
+    console.log(`Connection state changed from ${oldState.status} to ${newState.status}`);
+  });
+
+  connection.on(VoiceConnectionStatus.Disconnected, async (oldState, newState) => {
+    console.log('Voice Connection Disconnected:', oldState, newState);
+  });
+
+  connection.on('error', error => {
+    console.error('Voice Connection Error:', error);
+  });
+
+  const player = createAudioPlayer();
+  
+  player.on('error', error => {
+    console.error('Audio Player Error:', error);
+  });
+
+  player.on('stateChange', (oldState, newState) => {
+    console.log(`Audio player state changed from ${oldState.status} to ${newState.status}`);
+  });
+
+  const queue = new MusicQueue(player);
+  queues.set(guildId, queue);
+  
+  connection.subscribe(player);
+
+  player.on(AudioPlayerStatus.Idle, () => {
+    const nextSong = queue.getNextSong();
+    if (nextSong) {
+      playSong(nextSong.url, queue.getPlayer(), message, nextSong.title);
+    } else {
+      // No more songs in queue, check if we should disconnect
+      const channel = message.guild!.members.cache.get(message.client.user!.id)?.voice.channel;
+      if (channel) {
+        const humanMembers = channel.members.filter(member => !member.user.bot).size;
+        if (humanMembers === 0) {
+          connection.destroy();
+          queues.delete(guildId);
+        }
+      }
+    }
+  });
+  
+  return queue;
 }
 
 function createFfmpegStream(url: string): Readable {
