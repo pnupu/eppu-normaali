@@ -1,5 +1,5 @@
 // src/commands/play.ts
-import { Message } from 'discord.js';
+import { Message, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } from 'discord.js';
 import {
   joinVoiceChannel,
   createAudioPlayer,
@@ -35,6 +35,11 @@ interface PlaylistEntry {
 const queues = new Map<string, MusicQueue>();
 const COOKIES_PATH = path.join(__dirname, '../../cookies.txt');
 
+// Track the last bot message for each guild
+const lastBotMessages = new Map<string, Message>();
+// Track if we've already replied to the original play message
+const hasRepliedToPlay = new Map<string, boolean>();
+
 async function getPoToken(): Promise<string> {
   try {
     const response = await fetch('http://localhost:8080/token');
@@ -43,6 +48,68 @@ async function getPoToken(): Promise<string> {
   } catch (error) {
     console.error('Failed to fetch PO token:', error);
     throw error;
+  }
+}
+
+function createMusicControls() {
+  const row = new ActionRowBuilder<ButtonBuilder>()
+    .addComponents(
+      new ButtonBuilder()
+        .setCustomId('pause')
+        .setLabel('⏸️ Pause')
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId('resume')
+        .setLabel('▶️ Resume')
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId('skip')
+        .setLabel('⏭️ Skip')
+        .setStyle(ButtonStyle.Primary)
+    );
+  
+  return row;
+}
+
+async function sendOrEditMusicMessage(message: Message, content: string, isFirstSong: boolean = false) {
+  const guildId = message.guild!.id;
+  const controls = createMusicControls();
+  
+  try {
+    // If this is the first song and we haven't replied yet, reply to the original message
+    if (isFirstSong && !hasRepliedToPlay.get(guildId)) {
+      const reply = await message.reply({ content, components: [controls] });
+      lastBotMessages.set(guildId, reply);
+      hasRepliedToPlay.set(guildId, true);
+      return;
+    }
+    
+    // Check if we have a last bot message and if it's still the latest in the channel
+    const lastBotMessage = lastBotMessages.get(guildId);
+    if (lastBotMessage) {
+      try {
+        // Fetch the latest messages to see if our message is still the latest
+        const latestMessages = await message.channel.messages.fetch({ limit: 1 });
+        const latestMessage = latestMessages.first();
+        
+        if (latestMessage && latestMessage.id === lastBotMessage.id && latestMessage.author.id === message.client.user!.id) {
+          // Our message is still the latest, edit it
+          await lastBotMessage.edit({ content, components: [controls] });
+          return;
+        }
+      } catch (error) {
+        console.log('Could not fetch or edit last message, sending new one');
+      }
+    }
+    
+    // Send a new message
+    const newMessage = await (message.channel as any).send({ content, components: [controls] });
+    lastBotMessages.set(guildId, newMessage);
+    
+  } catch (error) {
+    console.error('Error sending/editing music message:', error);
+    // Fallback to simple message
+    (message.channel as any).send(content);
   }
 }
 
@@ -84,6 +151,8 @@ export async function handlePlay(message: Message, url: string) {
       throw new Error('No audio URL found');
     }
 
+    const isFirstSong = !queue;
+    
     if (!queue) {
       queue = await createQueueAndConnection(message);
     }
@@ -99,9 +168,9 @@ export async function handlePlay(message: Message, url: string) {
     
     // If this is the current song (no other song playing), start playing
     if (queue.getCurrentSong()?.url === queueItem.url) {
-      playSong(queueItem.url, queue.getPlayer(), message, queueItem.title);
+      playSong(queueItem.url, queue.getPlayer(), message, queueItem.title, isFirstSong);
     } else {
-      message.reply(`Added to queue: ${videoInfo.title}`);
+      await sendOrEditMusicMessage(message, `Added to queue: ${videoInfo.title}`);
     }
 
   } catch (error) {
@@ -137,6 +206,7 @@ async function handlePlaylist(message: Message, url: string, existingQueue?: Mus
     // Create queue if it doesn't exist
     const guildId = message.guild!.id;
     let queue = existingQueue || queues.get(guildId);
+    const isFirstSong = !queue;
     
     if (!queue) {
       queue = await createQueueAndConnection(message);
@@ -171,7 +241,7 @@ async function handlePlaylist(message: Message, url: string, existingQueue?: Mus
           
           // Start playing the first song if it's the current song
           if (queue.getCurrentSong()?.url === queueItem.url) {
-            playSong(queueItem.url, queue.getPlayer(), message, queueItem.title);
+            playSong(queueItem.url, queue.getPlayer(), message, queueItem.title, isFirstSong && addedCount === 1);
           }
         }
       } catch (error) {
@@ -237,6 +307,9 @@ async function createQueueAndConnection(message: Message): Promise<MusicQueue> {
         if (humanMembers === 0) {
           connection.destroy();
           queues.delete(guildId);
+          // Reset tracking for this guild
+          hasRepliedToPlay.delete(guildId);
+          lastBotMessages.delete(guildId);
         }
       }
     }
@@ -279,7 +352,7 @@ function createFfmpegStream(url: string): Readable {
   return stdout;
 }
 
-async function playSong(url: string, player: AudioPlayer, message: Message, title: string) {
+async function playSong(url: string, player: AudioPlayer, message: Message, title: string, isFirstSong: boolean = false) {
   try {
     console.log('Creating FFmpeg stream for URL:', url);
     const stream = createFfmpegStream(url);
@@ -291,7 +364,8 @@ async function playSong(url: string, player: AudioPlayer, message: Message, titl
 
     resource.volume?.setVolume(1);
     player.play(resource);
-    message.reply(`Now playing: ${title}`);
+    
+    await sendOrEditMusicMessage(message, `Now playing: ${title}`, isFirstSong);
   } catch (error) {
     console.error('Error in playSong:', error);
     message.reply('Error playing the audio');
@@ -363,19 +437,26 @@ export function handleQueue(message: Message) {
   message.reply(response);
 }
 
-export function handleEmbed(message: Message) {
-  const embed = {
-    color: 0x0099ff,
-    title: 'Embedded YouTube Video',
-    url: 'https://www.youtube.com/embed/aqz-KE-bpKQ',
-    description: 'Click the title to watch the video!',
-    thumbnail: {
-      url: 'https://img.youtube.com/vi/aqz-KE-bpKQ/maxresdefault.jpg',
-    },
-  };
+export function handleHelp(message: Message) {
+  const embed = new EmbedBuilder()
+    .setColor(0x0099ff)
+    .setTitle('🎵 Music Bot Commands')
+    .setDescription('Here are all the available commands:')
+    .addFields(
+      { name: '!play <url>', value: 'Play a YouTube video or playlist', inline: false },
+      { name: '!pause', value: 'Pause the current song', inline: true },
+      { name: '!resume', value: 'Resume the paused song', inline: true },
+      { name: '!skip', value: 'Skip the current song', inline: true },
+      { name: '!queue', value: 'Show the current music queue', inline: false },
+      { name: '!reset', value: 'Reset the bot and disconnect from all voice channels (Admin only)', inline: false },
+      { name: '!help', value: 'Show this help message', inline: false }
+    )
+    .setFooter({ text: 'You can also use the buttons on music messages for quick controls!' })
+    .setTimestamp();
 
   message.reply({ embeds: [embed] });
 }
+
 
 export function handleReset(message: Message) {
   if (!message.member?.permissions.has('Administrator')) {
@@ -406,69 +487,15 @@ export function handleReset(message: Message) {
         me.voice.disconnect();
         console.log(`Left voice channel in guild: ${guild.name}`);
       }
+      
+      // Reset tracking for this guild
+      hasRepliedToPlay.delete(guild.id);
+      lastBotMessages.delete(guild.id);
     });
 
     message.reply('Bot has been reset and disconnected from all voice channels!');
   } catch (error) {
     console.error('Reset command error:', error);
     message.reply('Error during reset!');
-  }
-}
-
-export async function handleCookies(message: Message, cookiesContent?: string) {
-  try {
-    if (!message.member?.permissions.has('Administrator')) {
-      message.reply('You need administrator permissions to use this command!');
-      return;
-    }
-
-    if (!cookiesContent) {
-      // If no content provided, read and show current cookies
-      const currentCookies = await fs.promises.readFile(COOKIES_PATH, 'utf-8');
-      // Split into multiple messages if too long
-      const chunks = currentCookies.match(/.{1,1500}/gs) || [];
-      for (let i = 0; i < chunks.length; i++) {
-        await message.reply(`${i === 0 ? 'Current cookies content:' : 'Continued...'}\n\`\`\`\n${chunks[i]}\n\`\`\``);
-      }
-      return;
-    }
-
-    // yt-dlp header
-    const header = '# Netscape HTTP Cookie File\n# This file is generated by yt-dlp.  Do not edit.\n\n';
-
-    // Process the content, keeping all valid cookie lines
-    const processedContent = cookiesContent
-      .split('\n')
-      .filter(line => {
-        const trimmed = line.trim();
-        // Keep lines that are either cookies or HttpOnly cookies
-        return trimmed && 
-               (trimmed.startsWith('.youtube.com') || 
-                trimmed.startsWith('#HttpOnly_.youtube.com'));
-      })
-      .map(line => {
-        // Split by any number of spaces or tabs
-        const parts = line.trim().split(/[\s\t]+/);
-        if (parts.length >= 7) {
-          // Remove any #HttpOnly_ prefix from the domain
-          const domain = parts[0].replace('#HttpOnly_', '');
-          // Add back #HttpOnly_ prefix if it was present
-          const prefix = line.trim().startsWith('#HttpOnly_') ? '#HttpOnly_' : '';
-          // Reconstruct with proper tab separation
-          return prefix + [domain, ...parts.slice(1, 7)].join('\t');
-        }
-        return line;
-      })
-      .join('\n');
-
-    // Combine header with processed content and add final newline
-    const finalContent = header + processedContent + '\n';
-
-    // Write new cookies content
-    await fs.promises.writeFile(COOKIES_PATH, finalContent);
-    await message.reply('Cookies file has been updated successfully! Use `!cookies` to view the current content.');
-  } catch (error) {
-    console.error('Error handling cookies command:', error);
-    message.reply('Error updating cookies file!');
   }
 }

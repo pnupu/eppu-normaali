@@ -1,6 +1,6 @@
 import { Client, GatewayIntentBits } from 'discord.js';
 import { config } from 'dotenv';
-import { handlePlay, handlePause, handleResume, handleSkip, handleQueue, handleCookies, handleEmbed, handleReset } from './commands/play';
+import { handlePlay, handlePause, handleResume, handleSkip, handleQueue, handleReset, handleHelp } from './commands/play';
 
 config();
 
@@ -44,15 +44,31 @@ client.on('messageCreate', async (message) => {
     case '!queue':
       handleQueue(message);
       break;
-    case '!cookies':
-      const cookiesContent = args.slice(1).join(' ');
-      await handleCookies(message, cookiesContent);
-      break;
-    case '!embed':
-      handleEmbed(message);
-      break;
     case '!reset':
       handleReset(message);
+      break;
+    case '!help':
+      handleHelp(message);
+      break;
+  }
+});
+
+// Handle button interactions
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isButton()) return;
+
+  switch (interaction.customId) {
+    case 'pause':
+      await interaction.deferUpdate();
+      handlePause(interaction.message as any);
+      break;
+    case 'resume':
+      await interaction.deferUpdate();
+      handleResume(interaction.message as any);
+      break;
+    case 'skip':
+      await interaction.deferUpdate();
+      handleSkip(interaction.message as any);
       break;
   }
 });
