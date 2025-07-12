@@ -17,6 +17,7 @@ import path from 'path';
 import { spawn } from 'child_process';
 import { Readable } from 'stream';
 import fs from 'fs';
+import { execSync } from 'child_process';
 
 interface ExtendedRequestedDownload {
   url: string;
@@ -39,6 +40,25 @@ const COOKIES_PATH = path.join(__dirname, '../../cookies.txt');
 const lastBotMessages = new Map<string, Message>();
 // Track if we've already replied to the original play message
 const hasRepliedToPlay = new Map<string, boolean>();
+
+// Check disk space and warn if low
+function checkDiskSpace(): { available: number; percentage: number } {
+  try {
+    const output = execSync('df -h / | tail -1', { encoding: 'utf8' });
+    const parts = output.trim().split(/\s+/);
+    const percentage = parseInt(parts[4].replace('%', ''));
+    const available = parts[3];
+    
+    if (percentage > 90) {
+      console.warn(`⚠️  Disk space warning: ${percentage}% used, ${available} available`);
+    }
+    
+    return { available: parseFloat(available), percentage };
+  } catch (error) {
+    console.error('Could not check disk space:', error);
+    return { available: 0, percentage: 0 };
+  }
+}
 
 async function getPoToken(): Promise<string> {
   try {
@@ -115,6 +135,14 @@ async function sendOrEditMusicMessage(message: Message, content: string, isFirst
 
 export async function handlePlay(message: Message, url: string) {
   console.log('Starting handlePlay with URL:', url);
+  
+  // Check disk space before proceeding
+  const diskInfo = checkDiskSpace();
+  if (diskInfo.percentage > 95) {
+    message.reply('⚠️ Error: Disk space critically low! Cannot play music. Please free up some space.');
+    return;
+  }
+  
   if (!message.member?.voice.channel) {
     console.log('User not in voice channel');
     message.reply('You need to be in a voice channel!');
@@ -142,6 +170,7 @@ export async function handlePlay(message: Message, url: string) {
       dumpSingleJson: true,
       format: 'bestaudio',
       cookies: COOKIES_PATH,
+      simulate: true,    // Don't download, just simulate
     };
 
     const videoInfo = await youtubeDl(url, flags) as unknown as ExtendedPayload;
@@ -158,17 +187,24 @@ export async function handlePlay(message: Message, url: string) {
     }
 
     console.log('Adding song to queue:', videoInfo.title);
+    const audioUrl = videoInfo.requested_downloads[0].url;
+    console.log('Audio URL obtained:', audioUrl.substring(0, 100) + '...');
+    
     const queueItem = {
       title: videoInfo.title,
-      url: videoInfo.requested_downloads[0].url,
+      url: audioUrl,
       requestedBy: message.author.username
     };
 
     queue.addSong(queueItem);
     
-    // If this is the current song (no other song playing), start playing
+    // If this is the current song (no other song playing), start playing immediately
     if (queue.getCurrentSong()?.url === queueItem.url) {
-      playSong(queueItem.url, queue.getPlayer(), message, queueItem.title, isFirstSong);
+      // Start playing immediately to avoid URL expiration
+      const currentQueue = queue;
+      setTimeout(() => {
+        playSong(queueItem.url, currentQueue.getPlayer(), message, queueItem.title, isFirstSong);
+      }, 100);
     } else {
       await sendOrEditMusicMessage(message, `Added to queue: ${videoInfo.title}`);
     }
@@ -188,6 +224,7 @@ async function handlePlaylist(message: Message, url: string, existingQueue?: Mus
       dumpSingleJson: true,
       flatPlaylist: true,
       cookies: COOKIES_PATH,
+      simulate: true,    // Don't download, just get info
     };
     
     const playlistInfo = await youtubeDl(url, playlistFlags) as any;
@@ -225,6 +262,7 @@ async function handlePlaylist(message: Message, url: string, existingQueue?: Mus
           dumpSingleJson: true,
           format: 'bestaudio',
           cookies: COOKIES_PATH,
+          simulate: true,    // Don't download, just get URL
         };
         
         const videoInfo = await youtubeDl(entry.url, videoFlags) as unknown as ExtendedPayload;
@@ -323,11 +361,16 @@ function createFfmpegStream(url: string): Readable {
     '-reconnect', '1',
     '-reconnect_streamed', '1',
     '-reconnect_delay_max', '5',
+    '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
     '-i', url,
+    '-analyzeduration', '0',
+    '-probesize', '32',        // Minimize probe size to reduce memory usage
+    '-loglevel', 'info',
     '-f', 's16le',
     '-ar', '48000',
     '-ac', '2',
-    '-loglevel', 'error',
+    '-acodec', 'pcm_s16le',
+    '-bufsize', '64k',         // Small buffer size to reduce memory usage
     'pipe:1'
   ]);
 
@@ -343,6 +386,20 @@ function createFfmpegStream(url: string): Readable {
     }
   });
 
+  // Handle stderr to see what FFmpeg is complaining about
+  ffmpeg.stderr.on('data', (data) => {
+    const errorMessage = data.toString();
+    console.error('FFmpeg stderr:', errorMessage);
+    
+    // Check for specific error patterns
+    if (errorMessage.includes('403') || errorMessage.includes('Forbidden')) {
+      console.error('FFmpeg: Access forbidden - URL may have expired');
+    }
+    if (errorMessage.includes('404') || errorMessage.includes('Not Found')) {
+      console.error('FFmpeg: URL not found - URL may have expired');
+    }
+  });
+
   // Handle stdout errors
   const stdout = ffmpeg.stdout;
   stdout.on('error', error => {
@@ -355,14 +412,23 @@ function createFfmpegStream(url: string): Readable {
 async function playSong(url: string, player: AudioPlayer, message: Message, title: string, isFirstSong: boolean = false) {
   try {
     console.log('Creating FFmpeg stream for URL:', url);
+    console.log('URL length:', url.length);
+    console.log('URL starts with:', url.substring(0, 100));
+    
     const stream = createFfmpegStream(url);
+    
+    // Add error handling for the stream
+    stream.on('error', (error) => {
+      console.error('Stream error:', error);
+      message.reply('Error with audio stream');
+    });
     
     const resource = createAudioResource(stream, {
       inputType: StreamType.Raw,
       inlineVolume: true
     });
 
-    resource.volume?.setVolume(1);
+    resource.volume?.setVolume(0.5); // Set volume to 50% to avoid distortion
     player.play(resource);
     
     await sendOrEditMusicMessage(message, `Now playing: ${title}`, isFirstSong);
@@ -499,3 +565,5 @@ export function handleReset(message: Message) {
     message.reply('Error during reset!');
   }
 }
+
+
