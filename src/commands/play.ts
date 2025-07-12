@@ -200,11 +200,8 @@ export async function handlePlay(message: Message, url: string) {
     
     // If this is the current song (no other song playing), start playing immediately
     if (queue.getCurrentSong()?.url === queueItem.url) {
-      // Start playing immediately with fresh URL
-      const currentQueue = queue;
-      setTimeout(() => {
-        playYouTubeUrl(queueItem.url, currentQueue.getPlayer(), message, queueItem.title, isFirstSong);
-      }, 100);
+      // Start playing immediately with fresh URL - no delay
+      playYouTubeUrl(queueItem.url, queue.getPlayer(), message, queueItem.title, isFirstSong);
     } else {
       await sendOrEditMusicMessage(message, `Added to queue: ${videoInfo.title}`);
     }
@@ -361,7 +358,15 @@ function createFfmpegStream(url: string): Readable {
     '-reconnect', '1',
     '-reconnect_streamed', '1',
     '-reconnect_delay_max', '5',
-    '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    '-headers', 'Accept: */*',
+    '-headers', 'Accept-Language: en-US,en;q=0.9',
+    '-headers', 'Accept-Encoding: identity',
+    '-headers', 'Range: bytes=0-',
+    '-headers', 'Connection: keep-alive',
+    '-headers', 'Sec-Fetch-Dest: video',
+    '-headers', 'Sec-Fetch-Mode: no-cors',
+    '-headers', 'Sec-Fetch-Site: cross-site',
     '-i', url,
     '-analyzeduration', '0',
     '-probesize', '32',        // Minimize probe size to reduce memory usage
@@ -431,6 +436,7 @@ async function playYouTubeUrl(youtubeUrl: string, player: AudioPlayer, message: 
     
     const freshAudioUrl = videoInfo.requested_downloads[0].url;
     console.log('Fresh audio URL obtained:', freshAudioUrl.substring(0, 100) + '...');
+    console.log('URL obtained at timestamp:', Date.now());
     
     // Now play with the fresh URL
     await playSong(freshAudioUrl, player, message, title, isFirstSong);
@@ -446,6 +452,7 @@ async function playSong(url: string, player: AudioPlayer, message: Message, titl
     console.log('Creating FFmpeg stream for URL:', url);
     console.log('URL length:', url.length);
     console.log('URL starts with:', url.substring(0, 100));
+    console.log('FFmpeg starting at timestamp:', Date.now());
     
     const stream = createFfmpegStream(url);
     
