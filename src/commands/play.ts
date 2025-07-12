@@ -12,6 +12,8 @@ import {
   getVoiceConnection
 } from '@discordjs/voice';
 import youtubeDl, { Payload, Flags } from 'youtube-dl-exec';
+import { spawn as spawnProcess } from 'child_process';
+import { promisify } from 'util';
 import { MusicQueue } from '../music/queue';
 import path from 'path';
 import { spawn } from 'child_process';
@@ -418,15 +420,44 @@ async function playYouTubeUrl(youtubeUrl: string, player: AudioPlayer, message: 
   try {
     console.log('Getting fresh audio URL for:', youtubeUrl);
     
-    // Get fresh audio URL right before playing
-    const flags: Flags = {
-      dumpSingleJson: true,
-      format: 'bestaudio',
-      cookies: COOKIES_PATH,
-      simulate: true,
-    };
-
-    const videoInfo = await youtubeDl(youtubeUrl, flags) as unknown as ExtendedPayload;
+    // Use yt-dlp directly with better anti-detection
+    const ytDlpArgs = [
+      '--dump-single-json',
+      '--format', 'bestaudio',
+      '--cookies', COOKIES_PATH,
+      '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      '--referer', 'https://www.youtube.com/',
+      '--add-header', 'Accept-Language:en-US,en;q=0.9',
+      '--extractor-retries', '3',
+      '--fragment-retries', '3',
+      '--simulate',
+      youtubeUrl
+    ];
+    
+    const ytDlpProcess = spawnProcess('yt-dlp', ytDlpArgs);
+    
+    let stdout = '';
+    let stderr = '';
+    
+    ytDlpProcess.stdout.on('data', (data) => {
+      stdout += data.toString();
+    });
+    
+    ytDlpProcess.stderr.on('data', (data) => {
+      stderr += data.toString();
+    });
+    
+    const exitCode = await new Promise<number>((resolve) => {
+      ytDlpProcess.on('close', resolve);
+    });
+    
+    if (exitCode !== 0) {
+      console.error('yt-dlp error:', stderr);
+      message.reply('Error getting fresh audio URL');
+      return;
+    }
+    
+    const videoInfo = JSON.parse(stdout);
     
     if (!videoInfo.requested_downloads?.[0]?.url) {
       console.error('No fresh audio URL found');

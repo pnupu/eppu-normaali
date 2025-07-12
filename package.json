@@ -15,7 +15,8 @@
         "ffmpeg-static": "^5.2.0",
         "opusscript": "^0.0.8",
         "sodium-native": "^5.0.6",
-        "youtube-dl-exec": "^3.0.22"
+        "youtube-dl-exec": "^3.0.22",
+        "yt-dlp-wrap": "^2.3.12"
     },
     "devDependencies": {
         "@types/node": "^24.0.4",
