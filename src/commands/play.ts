@@ -169,7 +169,6 @@ export async function handlePlay(message: Message, url: string) {
     const flags: Flags = {
       dumpSingleJson: true,
       format: 'bestaudio',
-      cookies: COOKIES_PATH,
       simulate: true,    // Don't download, just simulate
     };
 
@@ -220,7 +219,6 @@ async function handlePlaylist(message: Message, url: string, existingQueue?: Mus
     const playlistFlags: Flags = {
       dumpSingleJson: true,
       flatPlaylist: true,
-      cookies: COOKIES_PATH,
       simulate: true,    // Don't download, just get info
     };
     
@@ -258,7 +256,6 @@ async function handlePlaylist(message: Message, url: string, existingQueue?: Mus
         // Just get the title, store the YouTube URL for later
         const videoFlags: Flags = {
           dumpSingleJson: true,
-          cookies: COOKIES_PATH,
           simulate: true,
         };
         
@@ -415,20 +412,17 @@ function createFfmpegStream(url: string): Readable {
 }
 
 function createYouTubeStream(youtubeUrl: string): Readable {
+  // Use youtube-dl to pipe directly to FFmpeg
+  const youtubeDlProcess = spawn('youtube-dl', [
+    '--format', 'bestaudio',
+    '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    '--referer', 'https://www.youtube.com/',
+    '--output', '-',
+    youtubeUrl
+  ]);
+
   const ffmpeg = spawn('ffmpeg', [
-    '-reconnect', '1',
-    '-reconnect_streamed', '1',
-    '-reconnect_delay_max', '5',
-    '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    '-headers', 'Accept: */*',
-    '-headers', 'Accept-Language: en-US,en;q=0.9',
-    '-headers', 'Accept-Encoding: identity',
-    '-headers', 'Range: bytes=0-',
-    '-headers', 'Connection: keep-alive',
-    '-headers', 'Sec-Fetch-Dest: video',
-    '-headers', 'Sec-Fetch-Mode: no-cors',
-    '-headers', 'Sec-Fetch-Site: cross-site',
-    '-i', youtubeUrl,
+    '-i', 'pipe:0',
     '-analyzeduration', '0',
     '-probesize', '32',
     '-loglevel', 'info',
@@ -439,6 +433,24 @@ function createYouTubeStream(youtubeUrl: string): Readable {
     '-bufsize', '64k',
     'pipe:1'
   ]);
+
+  // Pipe youtube-dl output to FFmpeg input
+  youtubeDlProcess.stdout.pipe(ffmpeg.stdin);
+
+  // Handle youtube-dl errors
+  youtubeDlProcess.on('error', error => {
+    console.error('YouTube-dl process error:', error);
+  });
+
+  youtubeDlProcess.stderr.on('data', (data) => {
+    console.error('YouTube-dl stderr:', data.toString());
+  });
+
+  youtubeDlProcess.on('exit', (code, signal) => {
+    if (code !== 0) {
+      console.log(`YouTube-dl process exited with code ${code} and signal ${signal}`);
+    }
+  });
 
   // Handle process errors
   ffmpeg.on('error', error => {
