@@ -411,18 +411,38 @@ function createFfmpegStream(url: string): Readable {
   return stdout;
 }
 
-function createYouTubeStream(youtubeUrl: string): Readable {
-  // Use youtube-dl to pipe directly to FFmpeg
-  const youtubeDlProcess = spawn('youtube-dl', [
-    '--format', 'bestaudio',
-    '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    '--referer', 'https://www.youtube.com/',
-    '--output', '-',
-    youtubeUrl
-  ]);
+async function createYouTubeStream(youtubeUrl: string): Promise<Readable> {
+  // Get the direct audio URL first
+  console.log('Getting direct audio URL for streaming...');
+  
+  const flags: Flags = {
+    dumpSingleJson: true,
+    format: 'bestaudio',
+    simulate: true,
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    referer: 'https://www.youtube.com/',
+  };
 
+  const videoInfo = await youtubeDl(youtubeUrl, flags) as unknown as ExtendedPayload;
+  
+  if (!videoInfo.requested_downloads?.[0]?.url) {
+    throw new Error('No audio URL found');
+  }
+  
+  const audioUrl = videoInfo.requested_downloads[0].url;
+  console.log('Got audio URL, creating stream immediately...');
+  
+  // Create FFmpeg stream with the direct URL immediately
   const ffmpeg = spawn('ffmpeg', [
-    '-i', 'pipe:0',
+    '-reconnect', '1',
+    '-reconnect_streamed', '1',
+    '-reconnect_delay_max', '5',
+    '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    '-headers', 'Accept: */*',
+    '-headers', 'Accept-Language: en-US,en;q=0.9',
+    '-headers', 'Accept-Encoding: identity',
+    '-headers', 'Connection: keep-alive',
+    '-i', audioUrl,
     '-analyzeduration', '0',
     '-probesize', '32',
     '-loglevel', 'info',
@@ -433,24 +453,6 @@ function createYouTubeStream(youtubeUrl: string): Readable {
     '-bufsize', '64k',
     'pipe:1'
   ]);
-
-  // Pipe youtube-dl output to FFmpeg input
-  youtubeDlProcess.stdout.pipe(ffmpeg.stdin);
-
-  // Handle youtube-dl errors
-  youtubeDlProcess.on('error', error => {
-    console.error('YouTube-dl process error:', error);
-  });
-
-  youtubeDlProcess.stderr.on('data', (data) => {
-    console.error('YouTube-dl stderr:', data.toString());
-  });
-
-  youtubeDlProcess.on('exit', (code, signal) => {
-    if (code !== 0) {
-      console.log(`YouTube-dl process exited with code ${code} and signal ${signal}`);
-    }
-  });
 
   // Handle process errors
   ffmpeg.on('error', error => {
@@ -492,7 +494,7 @@ async function playYouTubeUrlDirect(youtubeUrl: string, player: AudioPlayer, mes
     console.log('Streaming directly from YouTube URL with FFmpeg:', youtubeUrl);
     
     // Use FFmpeg with youtube-dl to stream directly
-    const stream = createYouTubeStream(youtubeUrl);
+    const stream = await createYouTubeStream(youtubeUrl);
     
     // Add error handling for the stream
     stream.on('error', (error: Error) => {
