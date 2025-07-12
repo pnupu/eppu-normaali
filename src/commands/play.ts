@@ -187,12 +187,12 @@ export async function handlePlay(message: Message, url: string) {
     }
 
     console.log('Adding song to queue:', videoInfo.title);
-    const audioUrl = videoInfo.requested_downloads[0].url;
-    console.log('Audio URL obtained:', audioUrl.substring(0, 100) + '...');
     
+    // Store the original YouTube URL instead of the direct audio URL
+    // We'll get a fresh audio URL when we actually play it
     const queueItem = {
       title: videoInfo.title,
-      url: audioUrl,
+      url: url, // Store original YouTube URL
       requestedBy: message.author.username
     };
 
@@ -200,10 +200,10 @@ export async function handlePlay(message: Message, url: string) {
     
     // If this is the current song (no other song playing), start playing immediately
     if (queue.getCurrentSong()?.url === queueItem.url) {
-      // Start playing immediately to avoid URL expiration
+      // Start playing immediately with fresh URL
       const currentQueue = queue;
       setTimeout(() => {
-        playSong(queueItem.url, currentQueue.getPlayer(), message, queueItem.title, isFirstSong);
+        playYouTubeUrl(queueItem.url, currentQueue.getPlayer(), message, queueItem.title, isFirstSong);
       }, 100);
     } else {
       await sendOrEditMusicMessage(message, `Added to queue: ${videoInfo.title}`);
@@ -255,22 +255,22 @@ async function handlePlaylist(message: Message, url: string, existingQueue?: Mus
     
     message.reply(`Found ${totalVideos} videos in the playlist. Adding to queue...`);
     
-    // Get audio URLs for each video and add to queue
+    // Add YouTube URLs to queue (we'll get fresh audio URLs when playing)
     for (const entry of entries) {
       try {
+        // Just get the title, store the YouTube URL for later
         const videoFlags: Flags = {
           dumpSingleJson: true,
-          format: 'bestaudio',
           cookies: COOKIES_PATH,
-          simulate: true,    // Don't download, just get URL
+          simulate: true,
         };
         
         const videoInfo = await youtubeDl(entry.url, videoFlags) as unknown as ExtendedPayload;
         
-        if (videoInfo.requested_downloads?.[0]?.url) {
+        if (videoInfo.title) {
           const queueItem = {
             title: videoInfo.title,
-            url: videoInfo.requested_downloads[0].url,
+            url: entry.url, // Store YouTube URL, not direct audio URL
             requestedBy: message.author.username
           };
           
@@ -279,7 +279,7 @@ async function handlePlaylist(message: Message, url: string, existingQueue?: Mus
           
           // Start playing the first song if it's the current song
           if (queue.getCurrentSong()?.url === queueItem.url) {
-            playSong(queueItem.url, queue.getPlayer(), message, queueItem.title, isFirstSong && addedCount === 1);
+            playYouTubeUrl(queueItem.url, queue.getPlayer(), message, queueItem.title, isFirstSong && addedCount === 1);
           }
         }
       } catch (error) {
@@ -336,7 +336,7 @@ async function createQueueAndConnection(message: Message): Promise<MusicQueue> {
   player.on(AudioPlayerStatus.Idle, () => {
     const nextSong = queue.getNextSong();
     if (nextSong) {
-      playSong(nextSong.url, queue.getPlayer(), message, nextSong.title);
+      playYouTubeUrl(nextSong.url, queue.getPlayer(), message, nextSong.title);
     } else {
       // No more songs in queue, check if we should disconnect
       const channel = message.guild!.members.cache.get(message.client.user!.id)?.voice.channel;
@@ -407,6 +407,38 @@ function createFfmpegStream(url: string): Readable {
   });
 
   return stdout;
+}
+
+async function playYouTubeUrl(youtubeUrl: string, player: AudioPlayer, message: Message, title: string, isFirstSong: boolean = false) {
+  try {
+    console.log('Getting fresh audio URL for:', youtubeUrl);
+    
+    // Get fresh audio URL right before playing
+    const flags: Flags = {
+      dumpSingleJson: true,
+      format: 'bestaudio',
+      cookies: COOKIES_PATH,
+      simulate: true,
+    };
+
+    const videoInfo = await youtubeDl(youtubeUrl, flags) as unknown as ExtendedPayload;
+    
+    if (!videoInfo.requested_downloads?.[0]?.url) {
+      console.error('No fresh audio URL found');
+      message.reply('Error getting fresh audio URL');
+      return;
+    }
+    
+    const freshAudioUrl = videoInfo.requested_downloads[0].url;
+    console.log('Fresh audio URL obtained:', freshAudioUrl.substring(0, 100) + '...');
+    
+    // Now play with the fresh URL
+    await playSong(freshAudioUrl, player, message, title, isFirstSong);
+    
+  } catch (error) {
+    console.error('Error getting fresh URL:', error);
+    message.reply('Error getting fresh audio URL');
+  }
 }
 
 async function playSong(url: string, player: AudioPlayer, message: Message, title: string, isFirstSong: boolean = false) {
