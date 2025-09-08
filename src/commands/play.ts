@@ -1,5 +1,5 @@
 // src/commands/play.ts
-import { Message, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } from 'discord.js';
+import { Message, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, Client } from 'discord.js';
 import {
   joinVoiceChannel,
   createAudioPlayer,
@@ -57,6 +57,27 @@ function checkDiskSpace(): { available: number; percentage: number } {
   } catch (error) {
     console.error('Could not check disk space:', error);
     return { available: 0, percentage: 0 };
+  }
+}
+
+// Clean up log files to prevent them from growing too large
+function cleanupLogFiles() {
+  try {
+    const logFiles = ['eppu-out.log', 'eppu-error.log'];
+    const maxSize = 10 * 1024 * 1024; // 10MB
+    
+    logFiles.forEach(logFile => {
+      const logPath = path.join(__dirname, '../../', logFile);
+      if (fs.existsSync(logPath)) {
+        const stats = fs.statSync(logPath);
+        if (stats.size > maxSize) {
+          console.log(`Log file ${logFile} is ${(stats.size / 1024 / 1024).toFixed(2)}MB, truncating...`);
+          fs.truncateSync(logPath, 0);
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error cleaning up log files:', error);
   }
 }
 
@@ -305,7 +326,16 @@ async function createQueueAndConnection(message: Message): Promise<MusicQueue> {
   });
 
   connection.on(VoiceConnectionStatus.Disconnected, async (oldState, newState) => {
-    console.log('Voice Connection Disconnected:', oldState, newState);
+    console.log('Voice Connection Disconnected:', oldState.status, '->', newState.status);
+    
+    // Clean up queue and tracking when disconnected
+    const guildId = message.guild!.id;
+    if (queues.has(guildId)) {
+      queues.delete(guildId);
+      hasRepliedToPlay.delete(guildId);
+      lastBotMessages.delete(guildId);
+      console.log(`Cleaned up queue and tracking for guild: ${guildId}`);
+    }
   });
 
   connection.on('error', error => {
@@ -333,17 +363,7 @@ async function createQueueAndConnection(message: Message): Promise<MusicQueue> {
       playYouTubeUrl(nextSong.url, queue.getPlayer(), message, nextSong.title);
     } else {
       // No more songs in queue, check if we should disconnect
-      const channel = message.guild!.members.cache.get(message.client.user!.id)?.voice.channel;
-      if (channel) {
-        const humanMembers = channel.members.filter(member => !member.user.bot).size;
-        if (humanMembers === 0) {
-          connection.destroy();
-          queues.delete(guildId);
-          // Reset tracking for this guild
-          hasRepliedToPlay.delete(guildId);
-          lastBotMessages.delete(guildId);
-        }
-      }
+      checkAndLeaveChannel(guildId, message.client);
     }
   });
   
@@ -385,6 +405,8 @@ function createFfmpegStream(url: string): Readable {
   ffmpeg.on('exit', (code, signal) => {
     if (code !== 0) {
       console.log(`FFmpeg process exited with code ${code} and signal ${signal}`);
+    } else {
+      console.log('FFmpeg process completed successfully');
     }
   });
 
@@ -463,6 +485,8 @@ async function createYouTubeStream(youtubeUrl: string): Promise<Readable> {
   ffmpeg.on('exit', (code, signal) => {
     if (code !== 0) {
       console.log(`FFmpeg process exited with code ${code} and signal ${signal}`);
+    } else {
+      console.log('FFmpeg process completed successfully');
     }
   });
 
@@ -637,12 +661,29 @@ export function handleHelp(message: Message) {
       { name: '!skip', value: 'Skip the current song', inline: true },
       { name: '!queue', value: 'Show the current music queue', inline: false },
       { name: '!reset', value: 'Reset the bot and disconnect from all voice channels (Admin only)', inline: false },
+      { name: '!cleanup', value: 'Force cleanup and disconnect from voice channels (Admin only)', inline: false },
       { name: '!help', value: 'Show this help message', inline: false }
     )
     .setFooter({ text: 'You can also use the buttons on music messages for quick controls!' })
     .setTimestamp();
 
   message.reply({ embeds: [embed] });
+}
+
+export function handleCleanup(message: Message) {
+  if (!message.member?.permissions.has('Administrator')) {
+    message.reply('You need administrator permissions to use this command!');
+    return;
+  }
+
+  try {
+    message.reply('Running cleanup...');
+    checkAndLeaveIfNeeded(message.client);
+    message.reply('Cleanup completed! Check console for details.');
+  } catch (error) {
+    console.error('Cleanup command error:', error);
+    message.reply('Error during cleanup!');
+  }
 }
 
 
@@ -685,6 +726,112 @@ export function handleReset(message: Message) {
   } catch (error) {
     console.error('Reset command error:', error);
     message.reply('Error during reset!');
+  }
+}
+
+function checkAndLeaveChannel(guildId: string, client: Client) {
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) {
+    console.log(`Guild ${guildId} not found, cleaning up...`);
+    // Clean up even if guild not found
+    if (queues.has(guildId)) {
+      queues.delete(guildId);
+      hasRepliedToPlay.delete(guildId);
+      lastBotMessages.delete(guildId);
+    }
+    return;
+  }
+
+  const botMember = guild.members.cache.get(client.user!.id);
+  const channel = botMember?.voice.channel;
+  
+  if (!channel) {
+    console.log(`Bot not in voice channel in ${guild.name}, cleaning up...`);
+    // Clean up if not in voice channel
+    if (queues.has(guildId)) {
+      queues.delete(guildId);
+      hasRepliedToPlay.delete(guildId);
+      lastBotMessages.delete(guildId);
+    }
+    return;
+  }
+
+  const humanMembers = channel.members.filter(member => !member.user.bot).size;
+  const queue = queues.get(guildId);
+  const isPlaying = queue && queue.getCurrentSong() && !queue.isIdle();
+
+  console.log(`Checking ${guild.name}: ${humanMembers} humans, playing: ${isPlaying}, queue size: ${queue ? queue.getQueue().length : 0}`);
+
+  // Leave if bot is alone OR if no music is playing and queue is empty
+  if (humanMembers === 0 || (!isPlaying && (!queue || (!queue.getCurrentSong() && !queue.hasNextSong())))) {
+    console.log(`Leaving voice channel in ${guild.name}: ${humanMembers === 0 ? 'alone' : 'no music playing'}`);
+    
+    const connection = getVoiceConnection(guildId);
+    if (connection) {
+      try {
+        connection.destroy();
+        console.log(`Destroyed voice connection for ${guild.name}`);
+      } catch (error) {
+        console.error(`Error destroying connection for ${guild.name}:`, error);
+      }
+    }
+    
+    if (queue) {
+      try {
+        const player = queue.getPlayer();
+        player.stop();
+        console.log(`Stopped audio player for ${guild.name}`);
+      } catch (error) {
+        console.error(`Error stopping player for ${guild.name}:`, error);
+      }
+      queues.delete(guildId);
+    }
+    
+    // Reset tracking for this guild
+    hasRepliedToPlay.delete(guildId);
+    lastBotMessages.delete(guildId);
+    console.log(`Cleaned up all tracking for ${guild.name}`);
+  }
+}
+
+export function checkAndLeaveIfNeeded(client: Client, specificGuildId?: string) {
+  console.log(`Running checkAndLeaveIfNeeded for ${specificGuildId || 'all guilds'}`);
+  
+  // Clean up log files first
+  cleanupLogFiles();
+  
+  if (specificGuildId) {
+    const guild = client.guilds.cache.get(specificGuildId);
+    if (guild) {
+      const botMember = guild.members.cache.get(client.user!.id);
+      if (botMember?.voice.channel) {
+        checkAndLeaveChannel(guild.id, client);
+      } else {
+        // Bot not in voice channel, clean up anyway
+        checkAndLeaveChannel(guild.id, client);
+      }
+    } else {
+      // Guild not found, clean up anyway
+      checkAndLeaveChannel(specificGuildId, client);
+    }
+  } else {
+    // Check all guilds
+    let checkedGuilds = 0;
+    let cleanedGuilds = 0;
+    
+    client.guilds.cache.forEach(guild => {
+      checkedGuilds++;
+      const botMember = guild.members.cache.get(client.user!.id);
+      if (botMember?.voice.channel) {
+        checkAndLeaveChannel(guild.id, client);
+        cleanedGuilds++;
+      } else {
+        // Bot not in voice channel, clean up anyway
+        checkAndLeaveChannel(guild.id, client);
+      }
+    });
+    
+    console.log(`Checked ${checkedGuilds} guilds, cleaned up ${cleanedGuilds} voice connections`);
   }
 }
 

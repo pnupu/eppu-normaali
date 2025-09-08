@@ -16,7 +16,14 @@
         "opusscript": "^0.0.8",
         "sodium-native": "^5.0.6",
         "youtube-dl-exec": "^3.0.22",
-        "yt-dlp-wrap": "^2.3.12"
+        "yt-dlp-wrap": "^2.3.12",
+        "@picovoice/porcupine-node": "^3.0.0",
+        "openai": "^4.0.0",
+        "node-record-lpcm16": "^1.0.1",
+        "fuse.js": "^7.0.0",
+        "sqlite3": "^5.1.0",
+        "finnish-stemmer": "^1.0.0",
+        "espeak-ng": "^1.0.0"
     },
     "devDependencies": {
         "@types/node": "^24.0.4",

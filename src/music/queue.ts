@@ -74,4 +74,8 @@ export class MusicQueue {
   hasNextSong(): boolean {
     return this.queue.length > 0;
   }
+
+  isIdle(): boolean {
+    return this.player.state.status === 'Idle';
+  }
 }
