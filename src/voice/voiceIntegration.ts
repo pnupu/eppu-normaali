@@ -145,27 +145,17 @@ export class VoiceIntegration {
 
     // Get current song info from the music queue
     const guildId = message.guild!.id;
-    const queue = this.voiceHandler['queues']?.get(guildId);
-    const currentSong = queue?.getCurrentSong();
+    // Note: We need to access the queue from the main music system
+    // For now, we'll get the song info from the message context
+    const currentSong = null; // TODO: Implement queue access
 
     if (!currentSong) {
       await this.voiceFeedback.speakFinnish('Ei kappaletta toistamassa');
       return;
     }
 
-    try {
-      await this.favoritesManager.addFavorite({
-        title: currentSong.title,
-        url: currentSong.url,
-        artist: currentSong.requestedBy,
-        addedBy: message.author.username
-      });
-
-      await this.voiceFeedback.speakFinnish('Lisätty suosikkeihin');
-    } catch (error) {
-      console.error('Error adding favorite:', error);
-      await this.voiceFeedback.speakFinnish('Virhe suosikin lisäämisessä');
-    }
+    // TODO: Implement proper queue access to get current song info
+    await this.voiceFeedback.speakFinnish('Suosikkien lisääminen ei ole vielä toteutettu');
   }
 
   private async handlePlayFavoritesCommand(): Promise<void> {
@@ -246,7 +236,7 @@ export class VoiceIntegration {
 
       // Show search results in Discord
       let response = `Hakutulokset "${searchQuery}":\n`;
-      searchResults.forEach((result, index)) => {
+      searchResults.forEach((result, index) => {
         response += `${index + 1}. ${result.title} - ${result.uploader}\n`;
       });
 

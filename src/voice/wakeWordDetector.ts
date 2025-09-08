@@ -13,15 +13,11 @@ export class WakeWordDetector extends EventEmitter {
     super();
     
     // Initialize Porcupine with Finnish wake word "Eppu"
-    this.porcupine = new Porcupine({
-      accessKey: process.env.PICOVOICE_ACCESS_KEY || '',
-      keywords: [
-        {
-          builtin: 'Eppu', // We'll use a custom keyword for "Eppu"
-          sensitivity: 0.7
-        }
-      ]
-    });
+    this.porcupine = new Porcupine(
+      process.env.PICOVOICE_ACCESS_KEY || '',
+      ['Eppu'], // Wake word
+      [0.7]     // Sensitivity
+    );
 
     this.setupAudioCapture();
   }

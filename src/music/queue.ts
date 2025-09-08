@@ -76,6 +76,6 @@ export class MusicQueue {
   }
 
   isIdle(): boolean {
-    return this.player.state.status === 'Idle';
+    return this.player.state.status === 'idle';
   }
 }

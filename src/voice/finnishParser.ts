@@ -10,7 +10,7 @@ export interface ParsedCommand {
 
 export class FinnishCommandParser {
   private commandPatterns: Map<string, RegExp[]>;
-  private fuzzySearch: Fuse<string>;
+  private fuzzySearch!: Fuse<string>;
 
   constructor() {
     this.commandPatterns = new Map();
