@@ -9,9 +9,8 @@ echo "Installing system dependencies..."
 sudo apt-get update
 sudo apt-get install -y espeak-ng alsa-utils sox ffmpeg
 
-# Install Python dependencies for whisper (optional fallback)
-echo "Installing Python dependencies..."
-pip3 install openai-whisper
+# No additional Python dependencies needed
+# GPT-realtime handles all speech recognition
 
 # Create necessary directories
 echo "Creating directories..."

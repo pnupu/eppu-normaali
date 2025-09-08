@@ -104,16 +104,8 @@ export class VoiceCommandHandler {
       if (voiceCommand) {
         await this.executeVoiceCommand(voiceCommand);
       } else {
-        // Fallback to local parsing
-        const transcription = await this.transcribeAudio(audioFile);
-        if (transcription) {
-          const parsedCommand = this.commandParser.parseCommand(transcription);
-          if (parsedCommand) {
-            await this.executeParsedCommand(parsedCommand);
-          } else {
-            await this.voiceFeedback.speakFinnish('En ymmärtänyt komentoa');
-          }
-        }
+        // No fallback needed - GPT-realtime should handle everything
+        await this.voiceFeedback.speakFinnish('En ymmärtänyt komentoa');
       }
 
       // Clean up audio file
@@ -129,35 +121,6 @@ export class VoiceCommandHandler {
     }
   }
 
-  private async transcribeAudio(audioFile: string): Promise<string | null> {
-    try {
-      // Use whisper for local transcription as fallback
-      const whisper = spawn('whisper', [audioFile, '--language', 'fi', '--output_format', 'txt']);
-      
-      return new Promise((resolve, reject) => {
-        let output = '';
-        
-        whisper.stdout.on('data', (data) => {
-          output += data.toString();
-        });
-
-        whisper.on('close', (code) => {
-          if (code === 0) {
-            resolve(output.trim());
-          } else {
-            reject(new Error(`Whisper exited with code ${code}`));
-          }
-        });
-
-        whisper.on('error', (error) => {
-          reject(error);
-        });
-      });
-    } catch (error) {
-      console.error('Error transcribing audio:', error);
-      return null;
-    }
-  }
 
   private async executeVoiceCommand(command: VoiceCommand): Promise<void> {
     console.log('Executing voice command:', command);
