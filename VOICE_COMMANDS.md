@@ -4,7 +4,7 @@ This document describes the Finnish voice command system for the Eppu Discord mu
 
 ## Features
 
-- **Wake Word Detection**: Say "Eppu" to activate voice commands
+- **Wake Word Detection**: Say "Hei Eppu" to activate voice commands
 - **Finnish Language Support**: All commands in Finnish
 - **Local Processing**: Wake word detection runs locally on Raspberry Pi
 - **GPT-Realtime Integration**: Advanced speech recognition and command parsing
@@ -56,40 +56,40 @@ npm start
 
 | Finnish Command | English | Action |
 |----------------|---------|--------|
-| "Eppu, toista [kappale]" | "Eppu, play [song]" | Play a song |
-| "Eppu, tauko" | "Eppu, pause" | Pause music |
-| "Eppu, jatka" | "Eppu, resume" | Resume music |
-| "Eppu, seuraava" | "Eppu, next" | Skip to next song |
-| "Eppu, lopeta" | "Eppu, stop" | Stop music |
-| "Eppu, jono" | "Eppu, queue" | Show music queue |
+| "Hei Eppu, toista [kappale]" | "Hei Eppu, play [song]" | Play a song |
+| "Hei Eppu, tauko" | "Hei Eppu, pause" | Pause music |
+| "Hei Eppu, jatka" | "Hei Eppu, resume" | Resume music |
+| "Hei Eppu, seuraava" | "Hei Eppu, next" | Skip to next song |
+| "Hei Eppu, lopeta" | "Hei Eppu, stop" | Stop music |
+| "Hei Eppu, jono" | "Hei Eppu, queue" | Show music queue |
 
 ### Favorites System
 
 | Finnish Command | English | Action |
 |----------------|---------|--------|
-| "Eppu, lisää suosikkeihin" | "Eppu, add to favorites" | Add current song to favorites |
-| "Eppu, toista suosikit" | "Eppu, play favorites" | Play favorites playlist |
-| "Eppu, näytä suosikit" | "Eppu, show favorites" | Show favorites list |
+| "Hei Eppu, lisää suosikkeihin" | "Hei Eppu, add to favorites" | Add current song to favorites |
+| "Hei Eppu, toista suosikit" | "Hei Eppu, play favorites" | Play favorites playlist |
+| "Hei Eppu, näytä suosikit" | "Hei Eppu, show favorites" | Show favorites list |
 
 ### Search Commands
 
 | Finnish Command | English | Action |
 |----------------|---------|--------|
-| "Eppu, etsi [kappale]" | "Eppu, search [song]" | Search and play song |
-| "Eppu, hae [artisti]" | "Eppu, find [artist]" | Search by artist |
+| "Hei Eppu, etsi [kappale]" | "Hei Eppu, search [song]" | Search and play song |
+| "Hei Eppu, hae [artisti]" | "Hei Eppu, find [artist]" | Search by artist |
 
 ### Volume Control
 
 | Finnish Command | English | Action |
 |----------------|---------|--------|
-| "Eppu, äänenvoimakkuus ylös" | "Eppu, volume up" | Increase volume |
-| "Eppu, äänenvoimakkuus alas" | "Eppu, volume down" | Decrease volume |
+| "Hei Eppu, äänenvoimakkuus ylös" | "Hei Eppu, volume up" | Increase volume |
+| "Hei Eppu, äänenvoimakkuus alas" | "Hei Eppu, volume down" | Decrease volume |
 
 ### Help
 
 | Finnish Command | English | Action |
 |----------------|---------|--------|
-| "Eppu, apua" | "Eppu, help" | Show help message |
+| "Hei Eppu, apua" | "Hei Eppu, help" | Show help message |
 
 ## Technical Details
 
@@ -110,7 +110,7 @@ npm start
 
 ### Components
 
-1. **WakeWordDetector**: Local wake word detection using Porcupine
+1. **WakeWordDetector**: Local wake word detection using Porcupine (phrase "Hei Eppu")
 2. **GPTRealtimeHandler**: OpenAI integration for speech recognition
 3. **FinnishCommandParser**: Natural language processing for Finnish
 4. **VoiceFeedback**: Text-to-speech responses in Finnish

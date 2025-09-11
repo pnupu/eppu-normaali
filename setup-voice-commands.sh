@@ -2,7 +2,7 @@
 
 # Setup script for Finnish voice commands on Raspberry Pi
 
-echo "Setting up Finnish voice commands for Eppu music bot..."
+echo "Setting up Finnish voice commands for Eppu music bot (wake phrase: 'Hei Eppu')..."
 
 # Install system dependencies
 echo "Installing system dependencies..."
@@ -38,7 +38,7 @@ PICOVOICE_ACCESS_KEY=your_picovoice_access_key_here
 AUDIO_DEVICE=plughw:1,0
 
 # Voice Command Configuration
-WAKE_WORD=Eppu
+WAKE_WORD="Hei Eppu"
 VOICE_TIMEOUT=5000
 MAX_VOICE_DURATION=10000
 
@@ -69,7 +69,7 @@ echo "3. Test audio output: aplay test.wav"
 echo "4. Run the bot: npm start"
 echo ""
 echo "Voice commands:"
-echo "- Say 'Eppu' followed by a command"
-echo "- Example: 'Eppu, toista Metallica'"
-echo "- Example: 'Eppu, tauko'"
-echo "- Example: 'Eppu, jono'"
+echo "- Say 'Hei Eppu' followed by a command"
+echo "- Example: 'Hei Eppu, toista Metallica'"
+echo "- Example: 'Hei Eppu, tauko'"
+echo "- Example: 'Hei Eppu, jono'"

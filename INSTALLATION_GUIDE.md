@@ -93,7 +93,7 @@ PICOVOICE_ACCESS_KEY=your_picovoice_access_key_here
 AUDIO_DEVICE=plughw:1,0
 
 # Voice Command Configuration
-WAKE_WORD=Eppu
+WAKE_WORD="Hei Eppu"
 VOICE_TIMEOUT=5000
 MAX_VOICE_DURATION=10000
 ```

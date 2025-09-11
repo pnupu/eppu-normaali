@@ -1,3 +1,46 @@
+# OS
+.DS_Store
+
+# Env & secrets
+.env
+*.env
+
+# Node
+node_modules/
+dist/
+npm-debug.log*
+yarn-error.log*
+
+# Logs & databases
+logs/
+*.log
+*.db
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Training (wake word)
+train-wake-word/venv/
+train-wake-word/venv310/
+train-wake-word/.precise-venv/
+train-wake-word/wake-word/**
+train-wake-word/models/*.pb
+train-wake-word/models/*.net
+train-wake-word/negative.wav
+train-wake-word/precise-engine/
+train-wake-word/precise-engine.tar.gz
+train-wake-word/mycroft-precise/
+
+# Docker
+train-wake-word/.docker/
+
+# Misc
+temp/
+cookies.txt
+eppu-out.log
+eppu-error.log
 # Logs
 logs
 *.log

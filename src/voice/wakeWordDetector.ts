@@ -1,73 +1,71 @@
 // src/voice/wakeWordDetector.ts
-import { Porcupine } from '@picovoice/porcupine-node';
 import { spawn, ChildProcess } from 'child_process';
 import { EventEmitter } from 'events';
+import path from 'path';
+import { createWriteStream, unlinkSync, existsSync } from 'fs';
 
 export class WakeWordDetector extends EventEmitter {
-  private porcupine: Porcupine;
   private isListening = false;
-  private audioProcess: ChildProcess | null = null;
-  private audioBuffer: Buffer[] = [];
+  private preciseProcess: ChildProcess | null = null;
+  private modelPath: string;
 
   constructor() {
     super();
     
-    // Initialize Porcupine with Finnish wake word "Eppu"
-    this.porcupine = new Porcupine(
-      process.env.PICOVOICE_ACCESS_KEY || '',
-      ['Eppu'], // Wake word
-      [0.7]     // Sensitivity
-    );
-
-    this.setupAudioCapture();
+    // Use trained Precise model for Finnish wake phrase detection ("Hei Eppu")
+    this.modelPath = path.join(__dirname, '../../train-wake-word/models/hei_eppu.pb');
+    this.setupPrecise();
   }
 
-  private setupAudioCapture(): void {
-    // Use ALSA for direct audio capture on Raspberry Pi
-    // Adjust device based on your Pi's audio setup
-    this.audioProcess = spawn('arecord', [
-      '-f', 'S16_LE',    // 16-bit signed little endian
-      '-r', '16000',     // 16kHz sample rate
-      '-c', '1',         // Mono channel
-      '-D', 'plughw:1,0', // Audio device (adjust as needed)
-      '--buffer-size=1024'
-    ]);
+  private setupPrecise(): void {
+    // Check if trained model exists
+    if (!existsSync(this.modelPath)) {
+      console.warn(`Trained model not found: ${this.modelPath}`);
+      console.warn('Please train the model first using train-wake-word/train-model.py');
+      return;
+    }
 
-    this.audioProcess.stdout?.on('data', (chunk: Buffer) => {
-      if (this.isListening) {
-        this.processAudioChunk(chunk);
-      }
-    });
-
-    this.audioProcess.stderr?.on('data', (data) => {
-      console.error('Audio capture error:', data.toString());
-    });
-
-    this.audioProcess.on('close', (code) => {
-      console.log(`Audio capture process exited with code ${code}`);
-    });
+    console.log(`Using trained model: ${this.modelPath}`);
   }
 
-  private processAudioChunk(chunk: Buffer): void {
-    this.audioBuffer.push(chunk);
-    
-    // Process in chunks of 512 samples (1024 bytes for 16-bit audio)
-    const chunkSize = 1024;
-    while (this.audioBuffer.length >= chunkSize) {
-      const audioData = Buffer.concat(this.audioBuffer.splice(0, chunkSize));
-      
-      try {
-        // Convert buffer to Int16Array for Porcupine
-        const samples = new Int16Array(audioData.buffer, audioData.byteOffset, audioData.length / 2);
-        const keywordIndex = this.porcupine.process(samples);
-        
-        if (keywordIndex >= 0) {
-          console.log('Wake word detected: Eppu');
+  private startPrecise(): void {
+    if (this.preciseProcess) {
+      return; // Already running
+    }
+
+    try {
+      // Start precise-listen with the trained model
+      this.preciseProcess = spawn('precise-listen', [
+        this.modelPath,
+        '--sensitivity', '0.5',
+        '--chunk-size', '1024'
+      ]);
+
+      this.preciseProcess.stdout?.on('data', (data: Buffer) => {
+        const output = data.toString();
+        if (output.includes('HOTWORD')) {
+          console.log('Wake word detected: Hei Eppu');
           this.emit('wakeWordDetected');
         }
-      } catch (error) {
-        console.error('Error processing audio chunk:', error);
-      }
+      });
+
+      this.preciseProcess.stderr?.on('data', (data: Buffer) => {
+        console.error('Precise error:', data.toString());
+      });
+
+      this.preciseProcess.on('close', (code: number) => {
+        console.log(`Precise process exited with code ${code}`);
+        this.preciseProcess = null;
+      });
+
+      this.preciseProcess.on('error', (error: Error) => {
+        console.error('Precise process error:', error);
+        this.preciseProcess = null;
+      });
+
+    } catch (error) {
+      console.error('Error starting Precise:', error);
+      this.preciseProcess = null;
     }
   }
 
@@ -77,22 +75,29 @@ export class WakeWordDetector extends EventEmitter {
       return;
     }
 
+    if (!existsSync(this.modelPath)) {
+      console.error('Cannot start listening: trained model not found');
+      console.error('Please train the model first using train-wake-word/train-model.py');
+      return;
+    }
+
     this.isListening = true;
-    this.audioBuffer = [];
-    console.log('Started listening for wake word "Eppu"');
+    this.startPrecise();
+    console.log('Started listening for wake word "Hei Eppu"');
   }
 
   public stopListening(): void {
     this.isListening = false;
+    
+    if (this.preciseProcess) {
+      this.preciseProcess.kill();
+      this.preciseProcess = null;
+    }
+    
     console.log('Stopped listening for wake word');
   }
 
   public destroy(): void {
     this.stopListening();
-    if (this.audioProcess) {
-      this.audioProcess.kill();
-      this.audioProcess = null;
-    }
-    this.porcupine.release();
   }
 }
