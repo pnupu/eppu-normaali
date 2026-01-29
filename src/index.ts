@@ -1,7 +1,6 @@
 import { Client, GatewayIntentBits } from 'discord.js';
 import { config } from 'dotenv';
 import { handlePlay, handlePause, handleResume, handleSkip, handleQueue, handleNukkumaan, handleHelp, handleCleanup, checkAndLeaveIfNeeded } from './commands/play';
-import { VoiceIntegration } from './voice/voiceIntegration';
 import { startWebServer } from './web/server';
 
 config();
@@ -15,16 +14,10 @@ const client = new Client({
   ],
 });
 
-// Initialize voice command integration
-const voiceIntegration = new VoiceIntegration(client);
 
 client.once('ready', () => {
   console.log('Bot is ready!');
   
-  // Start voice command listening
-  voiceIntegration.startListening();
-  console.log('Voice commands enabled - say "Eppu" to activate');
-
   // Start web UI server
   startWebServer(client);
   
@@ -37,11 +30,6 @@ client.once('ready', () => {
 
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
-  
-  // Set current guild message for voice commands
-  if (message.guild) {
-    voiceIntegration.setCurrentGuildMessage(message.guild.id, message);
-  }
   
   const args = message.content.split(' ');
   const command = args[0].toLowerCase();
@@ -117,14 +105,14 @@ client.on('voiceStateUpdate', (oldState, newState) => {
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log('Shutting down gracefully...');
-  voiceIntegration.destroy();
+
   client.destroy();
   process.exit(0);
 });
 
 process.on('SIGTERM', () => {
   console.log('Shutting down gracefully...');
-  voiceIntegration.destroy();
+
   client.destroy();
   process.exit(0);
 });

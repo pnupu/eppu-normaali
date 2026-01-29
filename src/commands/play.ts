@@ -519,6 +519,9 @@ function createYouTubeStream(youtubeUrl: string): Readable {
 
   ytdlp.stdout.pipe(ffmpeg.stdin);
 
+  let ytdlpExited = false;
+  let ffmpegExited = false;
+
   ytdlp.stderr.on('data', (data) => {
     console.error('yt-dlp stderr:', data.toString().trim());
   });
@@ -528,6 +531,7 @@ function createYouTubeStream(youtubeUrl: string): Readable {
   });
 
   ytdlp.on('exit', (code) => {
+    ytdlpExited = true;
     if (code !== 0) console.log(`yt-dlp exited with code ${code}`);
   });
 
@@ -536,6 +540,7 @@ function createYouTubeStream(youtubeUrl: string): Readable {
   });
 
   ffmpeg.on('exit', (code) => {
+    ffmpegExited = true;
     if (code !== 0) console.log(`FFmpeg exited with code ${code}`);
     else console.log('FFmpeg completed successfully');
   });
@@ -551,9 +556,17 @@ function createYouTubeStream(youtubeUrl: string): Readable {
     console.error('FFmpeg stdout error:', error);
   });
 
-  // Clean up: if one process dies, kill the other
-  ytdlp.on('exit', () => { if (!ffmpeg.killed) ffmpeg.stdin.end(); });
-  ffmpeg.on('exit', () => { if (!ytdlp.killed) ytdlp.kill(); });
+  // Clean up: if one process dies, stop the other safely
+  ytdlp.on('exit', () => {
+    if (!ffmpegExited && !ffmpeg.stdin.destroyed && !ffmpeg.stdin.writableEnded) {
+      ffmpeg.stdin.end();
+    }
+  });
+  ffmpeg.on('exit', () => {
+    if (!ytdlpExited && ytdlp.exitCode === null) {
+      ytdlp.kill();
+    }
+  });
 
   return ffmpeg.stdout;
 }
