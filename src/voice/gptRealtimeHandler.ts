@@ -34,7 +34,7 @@ export class GPTRealtimeHandler extends EventEmitter {
       
       // Use OpenAI's audio transcription API
       const transcription = await this.openai.audio.transcriptions.create({
-        file: new File([audioBuffer], 'audio.wav', { type: 'audio/wav' }),
+        file: new File([new Uint8Array(audioBuffer)], 'audio.wav', { type: 'audio/wav' }),
         model: 'whisper-1',
         language: 'fi', // Finnish
         response_format: 'text'

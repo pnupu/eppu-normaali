@@ -13,7 +13,8 @@ export class WakeWordDetector extends EventEmitter {
     super();
     
     // Use trained Precise model for Finnish wake phrase detection ("Hei Eppu")
-    this.modelPath = path.join(__dirname, '../../train-wake-word/models/hei_eppu.pb');
+    // Model path can be set via WAKE_WORD_MODEL_PATH env var
+    this.modelPath = process.env.WAKE_WORD_MODEL_PATH || path.join(__dirname, '../../models/hei_eppu.pb');
     this.setupPrecise();
   }
 
@@ -21,7 +22,7 @@ export class WakeWordDetector extends EventEmitter {
     // Check if trained model exists
     if (!existsSync(this.modelPath)) {
       console.warn(`Trained model not found: ${this.modelPath}`);
-      console.warn('Please train the model first using train-wake-word/train-model.py');
+      console.warn('Set WAKE_WORD_MODEL_PATH environment variable to the model location');
       return;
     }
 
@@ -77,7 +78,7 @@ export class WakeWordDetector extends EventEmitter {
 
     if (!existsSync(this.modelPath)) {
       console.error('Cannot start listening: trained model not found');
-      console.error('Please train the model first using train-wake-word/train-model.py');
+      console.error('Set WAKE_WORD_MODEL_PATH environment variable to the model location');
       return;
     }
 

@@ -1,7 +1,7 @@
 // src/music/queue.ts
 import { AudioPlayer, AudioResource } from '@discordjs/voice';
 
-interface QueueItem {
+export interface QueueItem {
   title: string;
   url: string;
   requestedBy: string;
@@ -77,5 +77,22 @@ export class MusicQueue {
 
   isIdle(): boolean {
     return this.player.state.status === 'idle';
+  }
+
+  isPausedState(): boolean {
+    return this.isPaused;
+  }
+
+  removeSong(index: number): boolean {
+    if (index < 0 || index >= this.queue.length) return false;
+    this.queue.splice(index, 1);
+    return true;
+  }
+
+  moveSong(from: number, to: number): boolean {
+    if (from < 0 || from >= this.queue.length || to < 0 || to >= this.queue.length) return false;
+    const [item] = this.queue.splice(from, 1);
+    this.queue.splice(to, 0, item);
+    return true;
   }
 }

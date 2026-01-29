@@ -1,7 +1,8 @@
 import { Client, GatewayIntentBits } from 'discord.js';
 import { config } from 'dotenv';
-import { handlePlay, handlePause, handleResume, handleSkip, handleQueue, handleReset, handleHelp, handleCleanup, checkAndLeaveIfNeeded } from './commands/play';
+import { handlePlay, handlePause, handleResume, handleSkip, handleQueue, handleNukkumaan, handleHelp, handleCleanup, checkAndLeaveIfNeeded } from './commands/play';
 import { VoiceIntegration } from './voice/voiceIntegration';
+import { startWebServer } from './web/server';
 
 config();
 
@@ -23,6 +24,9 @@ client.once('ready', () => {
   // Start voice command listening
   voiceIntegration.startListening();
   console.log('Voice commands enabled - say "Eppu" to activate');
+
+  // Start web UI server
+  startWebServer(client);
   
   // Start periodic check every 15 minutes for inactive voice connections
   setInterval(() => {
@@ -63,8 +67,8 @@ client.on('messageCreate', async (message) => {
     case '!queue':
       handleQueue(message);
       break;
-    case '!reset':
-      handleReset(message);
+    case '!nukkumaan':
+      handleNukkumaan(message);
       break;
     case '!help':
       handleHelp(message);

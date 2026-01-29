@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Eppu Music Bot</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#1a1a2e;color:#e0e0e0;min-height:100vh;display:flex;flex-direction:column;align-items:center}
+.container{max-width:600px;width:100%;padding:16px}
+h1{text-align:center;margin:16px 0;color:#e94560}
+.card{background:#16213e;border-radius:12px;padding:16px;margin-bottom:12px}
+.card h2{font-size:14px;color:#888;text-transform:uppercase;margin-bottom:8px}
+.now-playing{font-size:18px;font-weight:600;color:#fff;margin-bottom:4px}
+.requested-by{font-size:12px;color:#888}
+.controls{display:flex;gap:8px;margin-top:12px}
+.controls button{flex:1;padding:10px;border:none;border-radius:8px;font-size:16px;cursor:pointer;background:#0f3460;color:#fff}
+.controls button:hover{background:#e94560}
+.controls button:active{transform:scale(0.97)}
+#addForm{display:flex;gap:8px}
+#addForm input{flex:1;padding:10px;border:none;border-radius:8px;background:#0f3460;color:#fff;font-size:14px}
+#addForm input::placeholder{color:#666}
+#addForm button{padding:10px 16px;border:none;border-radius:8px;background:#e94560;color:#fff;cursor:pointer;font-size:14px}
+.queue-item{display:flex;align-items:center;padding:8px;border-radius:8px;margin-bottom:4px;background:#0f3460;cursor:grab}
+.queue-item:active{cursor:grabbing}
+.queue-item .title{flex:1;font-size:14px}
+.queue-item .remove{background:none;border:none;color:#e94560;cursor:pointer;font-size:18px;padding:0 8px}
+.volume-wrap{display:flex;align-items:center;gap:12px}
+.volume-wrap input[type=range]{flex:1;accent-color:#e94560}
+.volume-wrap span{min-width:36px;text-align:right}
+.guild-select{width:100%;padding:8px;border-radius:8px;background:#0f3460;color:#fff;border:none;margin-bottom:12px;font-size:14px}
+.login-wrap{text-align:center;margin-top:40px}
+.admin-section input{flex:1;padding:8px;border:none;border-radius:8px;background:#0f3460;color:#fff;font-size:14px}
+.admin-section{display:flex;gap:8px}
+.admin-section button{padding:8px 16px;border:none;border-radius:8px;background:#e94560;color:#fff;cursor:pointer}
+.empty{color:#666;font-style:italic;text-align:center;padding:12px}
+.status-msg{text-align:center;padding:8px;color:#e94560;font-size:13px}
+.hidden{display:none}
+</style>
+</head>
+<body>
+
+<div class="container" id="app">
+  <h1>Eppu</h1>
+
+  <!-- Login -->
+  <div id="loginSection" class="login-wrap">
+    <div id="g_id_onload"
+         data-callback="onGoogleSignIn"
+         data-auto_prompt="false">
+    </div>
+    <div class="g_id_signin" data-type="standard" data-theme="filled_black" data-size="large"></div>
+    <p style="margin-top:12px;color:#888">Sign in to control the music bot</p>
+  </div>
+
+  <!-- Main UI -->
+  <div id="mainSection" class="hidden">
+    <select id="guildSelect" class="guild-select"></select>
+
+    <div class="card">
+      <h2>Now Playing</h2>
+      <div id="nowPlaying" class="empty">Nothing playing</div>
+    </div>
+
+    <div class="card">
+      <div class="controls">
+        <button onclick="api('pause')">⏸ Pause</button>
+        <button onclick="api('skip')">⏭ Skip</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Add Song</h2>
+      <form id="addForm" onsubmit="addSong(event)">
+        <input type="text" id="urlInput" placeholder="YouTube URL" required>
+        <button type="submit">Add</button>
+      </form>
+      <div id="addStatus" class="status-msg hidden"></div>
+    </div>
+
+    <div class="card">
+      <h2>Volume</h2>
+      <div class="volume-wrap">
+        <input type="range" id="volumeSlider" min="0" max="100" value="50" oninput="setVolume(this.value)">
+        <span id="volumeLabel">50</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Queue</h2>
+      <div id="queueList"></div>
+    </div>
+
+    <div id="adminCard" class="card hidden">
+      <h2>Invite User</h2>
+      <form class="admin-section" onsubmit="inviteUser(event)">
+        <input type="email" id="inviteEmail" placeholder="email@example.com" required>
+        <button type="submit">Invite</button>
+      </form>
+      <div id="inviteStatus" class="status-msg hidden"></div>
+    </div>
+
+    <div style="text-align:center;margin:12px 0">
+      <span id="userInfo" style="color:#666;font-size:12px"></span>
+    </div>
+  </div>
+</div>
+
+<script>
+const POLL_INTERVAL = 3000;
+let currentGuild = null;
+let isAdmin = false;
+let dragFrom = null;
+
+function onGoogleSignIn(response) {
+  fetch('/api/auth/verify', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({idToken: response.credential})
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.error) { alert(data.error); return; }
+    isAdmin = data.isAdmin;
+    showMain();
+  })
+  .catch(() => alert('Login failed'));
+}
+
+function showMain() {
+  document.getElementById('loginSection').classList.add('hidden');
+  document.getElementById('mainSection').classList.remove('hidden');
+  if (isAdmin) document.getElementById('adminCard').classList.remove('hidden');
+  fetchState();
+  setInterval(fetchState, POLL_INTERVAL);
+  fetchMe();
+}
+
+function fetchMe() {
+  fetch('/api/auth/me').then(r=>r.json()).then(d=>{
+    if (d.email) {
+      document.getElementById('userInfo').textContent = d.name + ' (' + d.email + ')';
+      isAdmin = d.isAdmin;
+      if (isAdmin) document.getElementById('adminCard').classList.remove('hidden');
+    }
+  }).catch(()=>{});
+}
+
+function fetchState() {
+  fetch('/api/state').then(r => {
+    if (r.status === 401) { location.reload(); return; }
+    return r.json();
+  }).then(data => {
+    if (!data) return;
+    // Populate guild select
+    const sel = document.getElementById('guildSelect');
+    const guilds = Object.keys(data);
+    if (guilds.length === 0) {
+      sel.innerHTML = '<option>No active guilds</option>';
+      document.getElementById('nowPlaying').innerHTML = '<span class="empty">No active queue</span>';
+      document.getElementById('queueList').innerHTML = '<div class="empty">Empty</div>';
+      return;
+    }
+    if (!currentGuild || !guilds.includes(currentGuild)) currentGuild = guilds[0];
+    sel.innerHTML = guilds.map(g => '<option value="'+g+'" '+(g===currentGuild?'selected':'')+'>'+data[g].guildName+'</option>').join('');
+    sel.onchange = function(){ currentGuild = this.value; fetchState(); };
+    if (guilds.length <= 1) sel.style.display = 'none'; else sel.style.display = '';
+
+    const s = data[currentGuild];
+    // Now playing
+    const np = document.getElementById('nowPlaying');
+    if (s.currentSong) {
+      np.innerHTML = '<div class="now-playing">'+esc(s.currentSong.title)+'</div><div class="requested-by">Requested by '+esc(s.currentSong.requestedBy)+(s.paused?' — Paused':'')+'</div>';
+    } else {
+      np.innerHTML = '<span class="empty">Nothing playing</span>';
+    }
+    // Volume
+    document.getElementById('volumeSlider').value = s.volume;
+    document.getElementById('volumeLabel').textContent = s.volume;
+    // Queue
+    const ql = document.getElementById('queueList');
+    if (s.queue.length === 0) {
+      ql.innerHTML = '<div class="empty">Empty</div>';
+    } else {
+      ql.innerHTML = s.queue.map((item, i) =>
+        '<div class="queue-item" draggable="true" data-idx="'+i+'" ondragstart="dragStart(event,'+i+')" ondragover="event.preventDefault()" ondrop="drop(event,'+i+')">'+
+        '<span class="title">'+esc(item.title)+'</span>'+
+        '<button class="remove" onclick="removeFromQueue('+i+')">&times;</button>'+
+        '</div>'
+      ).join('');
+    }
+  }).catch(()=>{});
+}
+
+function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+
+function api(action, body) {
+  const opts = {method:'POST',headers:{'Content-Type':'application/json'}};
+  if (body) opts.body = JSON.stringify({...body, guildId: currentGuild});
+  else opts.body = JSON.stringify({guildId: currentGuild});
+  return fetch('/api/'+action, opts).then(r=>r.json());
+}
+
+function addSong(e) {
+  e.preventDefault();
+  const url = document.getElementById('urlInput').value.trim();
+  if (!url) return;
+  const st = document.getElementById('addStatus');
+  st.textContent = 'Adding...'; st.classList.remove('hidden');
+  api('play', {url}).then(d=>{
+    st.textContent = d.error || 'Added!';
+    if (!d.error) document.getElementById('urlInput').value = '';
+    setTimeout(()=>st.classList.add('hidden'), 2000);
+    fetchState();
+  });
+}
+
+function removeFromQueue(index) {
+  api('remove', {index}).then(()=>fetchState());
+}
+
+function setVolume(v) {
+  document.getElementById('volumeLabel').textContent = v;
+  api('volume', {volume: parseInt(v)});
+}
+
+function dragStart(e, idx) { dragFrom = idx; e.dataTransfer.effectAllowed='move'; }
+function drop(e, to) {
+  e.preventDefault();
+  if (dragFrom === null || dragFrom === to) return;
+  api('move', {from: dragFrom, to}).then(()=>fetchState());
+  dragFrom = null;
+}
+
+function inviteUser(e) {
+  e.preventDefault();
+  const email = document.getElementById('inviteEmail').value.trim();
+  const st = document.getElementById('inviteStatus');
+  fetch('/api/auth/invite', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email})})
+  .then(r=>r.json()).then(d=>{
+    st.textContent = d.error || 'Invited!';
+    st.classList.remove('hidden');
+    if (!d.error) document.getElementById('inviteEmail').value = '';
+    setTimeout(()=>st.classList.add('hidden'), 2000);
+  });
+}
+
+// Check if already logged in
+fetch('/api/auth/me').then(r=>{
+  if (r.ok) return r.json();
+  throw new Error();
+}).then(d=>{
+  if (d.email) { isAdmin = d.isAdmin; showMain(); }
+}).catch(()=>{});
+</script>
+<script>
+// Load Google Sign-In dynamically with client ID from server
+fetch('/api/auth/client-id').then(r=>r.json()).then(d=>{
+  if (!d.clientId) return;
+  document.getElementById('g_id_onload').setAttribute('data-client_id', d.clientId);
+  const s = document.createElement('script');
+  s.src = 'https://accounts.google.com/gsi/client';
+  s.async = true;
+  document.head.appendChild(s);
+});
+</script>
+</body>
+</html>

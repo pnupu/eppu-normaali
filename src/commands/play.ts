@@ -9,7 +9,8 @@ import {
   AudioPlayerStatus,
   AudioPlayer,
   VoiceConnectionStatus,
-  getVoiceConnection
+  getVoiceConnection,
+  entersState
 } from '@discordjs/voice';
 import youtubeDl, { Payload, Flags } from 'youtube-dl-exec';
 import { MusicQueue } from '../music/queue';
@@ -33,7 +34,49 @@ interface PlaylistEntry {
   id: string;
 }
 
-const queues = new Map<string, MusicQueue>();
+export const queues = new Map<string, MusicQueue>();
+
+// Per-guild volume tracking (0-100)
+const guildVolumes = new Map<string, number>();
+
+export function getVolume(guildId: string): number {
+  return guildVolumes.get(guildId) ?? 50;
+}
+
+export function setVolume(guildId: string, volume: number): void {
+  guildVolumes.set(guildId, Math.max(0, Math.min(100, volume)));
+}
+
+export async function addSongFromWeb(guildId: string, url: string, requestedBy: string): Promise<{ success: boolean; error?: string }> {
+  const queue = queues.get(guildId);
+  if (!queue) {
+    return { success: false, error: 'No active queue in this guild. Start playing from Discord first.' };
+  }
+
+  try {
+    const flags: Flags = {
+      dumpSingleJson: true,
+      format: 'bestaudio',
+      simulate: true,
+    };
+
+    const videoInfo = await youtubeDl(url, flags) as unknown as ExtendedPayload;
+
+    if (!videoInfo.title) {
+      return { success: false, error: 'Could not get video info' };
+    }
+
+    queue.addSong({
+      title: videoInfo.title,
+      url: url,
+      requestedBy: requestedBy
+    });
+
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: 'Failed to fetch video info' };
+  }
+}
 const COOKIES_PATH = path.join(__dirname, '../../cookies.txt');
 
 // Track the last bot message for each guild
@@ -325,16 +368,26 @@ async function createQueueAndConnection(message: Message): Promise<MusicQueue> {
     console.log(`Connection state changed from ${oldState.status} to ${newState.status}`);
   });
 
-  connection.on(VoiceConnectionStatus.Disconnected, async (oldState, newState) => {
-    console.log('Voice Connection Disconnected:', oldState.status, '->', newState.status);
-    
-    // Clean up queue and tracking when disconnected
-    const guildId = message.guild!.id;
-    if (queues.has(guildId)) {
-      queues.delete(guildId);
-      hasRepliedToPlay.delete(guildId);
-      lastBotMessages.delete(guildId);
-      console.log(`Cleaned up queue and tracking for guild: ${guildId}`);
+  connection.on(VoiceConnectionStatus.Disconnected, async () => {
+    console.log('Voice connection disconnected, attempting reconnect...');
+    try {
+      await Promise.race([
+        entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
+        entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
+      ]);
+      // Reconnecting successfully
+      console.log('Voice connection reconnecting...');
+    } catch {
+      // Reconnect failed, destroy the connection
+      console.log('Voice connection reconnect failed, destroying connection');
+      connection.destroy();
+      const guildId = message.guild!.id;
+      if (queues.has(guildId)) {
+        queues.delete(guildId);
+        hasRepliedToPlay.delete(guildId);
+        lastBotMessages.delete(guildId);
+        console.log(`Cleaned up queue and tracking for guild: ${guildId}`);
+      }
     }
   });
 
@@ -516,16 +569,27 @@ async function createYouTubeStream(youtubeUrl: string): Promise<Readable> {
 async function playYouTubeUrlDirect(youtubeUrl: string, player: AudioPlayer, message: Message, title: string, isFirstSong: boolean = false) {
   try {
     console.log('Streaming directly from YouTube URL with FFmpeg:', youtubeUrl);
-    
-    // Use FFmpeg with youtube-dl to stream directly
-    const stream = await createYouTubeStream(youtubeUrl);
-    
+
+    let stream: Readable;
+    try {
+      stream = await createYouTubeStream(youtubeUrl);
+    } catch (firstError) {
+      console.error('First stream attempt failed, retrying:', firstError);
+      try {
+        stream = await createYouTubeStream(youtubeUrl);
+      } catch (retryError) {
+        console.error('Retry also failed:', retryError);
+        (message.channel as any).send(`Failed to load: ${title}, skipping...`);
+        player.stop();
+        return;
+      }
+    }
+
     // Add error handling for the stream
     stream.on('error', (error: Error) => {
       console.error('YouTube stream error:', error);
-      message.reply('Error with YouTube stream');
     });
-    
+
     const resource = createAudioResource(stream, {
       inputType: StreamType.Raw,
       inlineVolume: true
@@ -533,11 +597,12 @@ async function playYouTubeUrlDirect(youtubeUrl: string, player: AudioPlayer, mes
 
     resource.volume?.setVolume(0.5);
     player.play(resource);
-    
+
     await sendOrEditMusicMessage(message, `Now playing: ${title}`, isFirstSong);
   } catch (error) {
     console.error('Error in playYouTubeUrlDirect:', error);
-    message.reply('Error streaming from YouTube');
+    (message.channel as any).send(`Failed to play: ${title}, skipping...`);
+    player.stop();
   }
 }
 
@@ -660,7 +725,7 @@ export function handleHelp(message: Message) {
       { name: '!resume', value: 'Resume the paused song', inline: true },
       { name: '!skip', value: 'Skip the current song', inline: true },
       { name: '!queue', value: 'Show the current music queue', inline: false },
-      { name: '!reset', value: 'Reset the bot and disconnect from all voice channels (Admin only)', inline: false },
+      { name: '!nukkumaan', value: 'Reset the bot and disconnect from all voice channels (Admin only)', inline: false },
       { name: '!cleanup', value: 'Force cleanup and disconnect from voice channels (Admin only)', inline: false },
       { name: '!help', value: 'Show this help message', inline: false }
     )
@@ -687,7 +752,7 @@ export function handleCleanup(message: Message) {
 }
 
 
-export function handleReset(message: Message) {
+export function handleNukkumaan(message: Message) {
   if (!message.member?.permissions.has('Administrator')) {
     message.reply('You need administrator permissions to use this command!');
     return;
