@@ -415,8 +415,13 @@ async function createQueueAndConnection(message: Message): Promise<MusicQueue> {
     if (nextSong) {
       playYouTubeUrl(nextSong.url, queue.getPlayer(), message, nextSong.title);
     } else {
-      // No more songs in queue, check if we should disconnect
-      checkAndLeaveChannel(guildId, message.client);
+      // Wait before disconnecting so users can queue more songs
+      setTimeout(() => {
+        // Re-check: if a song was added during the delay, don't leave
+        if (!queue.getCurrentSong() && !queue.hasNextSong()) {
+          checkAndLeaveChannel(guildId, message.client);
+        }
+      }, 60_000); // Wait 60 seconds before leaving
     }
   });
   
@@ -486,41 +491,24 @@ function createFfmpegStream(url: string): Readable {
   return stdout;
 }
 
-async function createYouTubeStream(youtubeUrl: string): Promise<Readable> {
-  // Get the direct audio URL first
-  console.log('Getting direct audio URL for streaming...');
-  
-  const flags: Flags = {
-    dumpSingleJson: true,
-    format: 'bestaudio',
-    simulate: true,
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    referer: 'https://www.youtube.com/',
-  };
+function createYouTubeStream(youtubeUrl: string): Readable {
+  // Pipe yt-dlp audio output directly into FFmpeg to avoid URL expiry/403 issues
+  console.log('Piping yt-dlp -> ffmpeg for:', youtubeUrl);
 
-  const videoInfo = await youtubeDl(youtubeUrl, flags) as unknown as ExtendedPayload;
-  
-  if (!videoInfo.requested_downloads?.[0]?.url) {
-    throw new Error('No audio URL found');
-  }
-  
-  const audioUrl = videoInfo.requested_downloads[0].url;
-  console.log('Got audio URL, creating stream immediately...');
-  
-  // Create FFmpeg stream with the direct URL immediately
+  const ytdlpBin = path.join(__dirname, '../../node_modules/youtube-dl-exec/bin/yt-dlp');
+
+  const ytdlp = spawn(ytdlpBin, [
+    '-f', 'bestaudio',
+    '-o', '-',
+    '--no-warnings',
+    youtubeUrl
+  ]);
+
   const ffmpeg = spawn('ffmpeg', [
-    '-reconnect', '1',
-    '-reconnect_streamed', '1',
-    '-reconnect_delay_max', '5',
-    '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    '-headers', 'Accept: */*',
-    '-headers', 'Accept-Language: en-US,en;q=0.9',
-    '-headers', 'Accept-Encoding: identity',
-    '-headers', 'Connection: keep-alive',
-    '-i', audioUrl,
+    '-i', 'pipe:0',
     '-analyzeduration', '0',
     '-probesize', '32',
-    '-loglevel', 'info',
+    '-loglevel', 'warning',
     '-f', 's16le',
     '-ar', '48000',
     '-ac', '2',
@@ -529,61 +517,52 @@ async function createYouTubeStream(youtubeUrl: string): Promise<Readable> {
     'pipe:1'
   ]);
 
-  // Handle process errors
+  ytdlp.stdout.pipe(ffmpeg.stdin);
+
+  ytdlp.stderr.on('data', (data) => {
+    console.error('yt-dlp stderr:', data.toString().trim());
+  });
+
+  ytdlp.on('error', error => {
+    console.error('yt-dlp process error:', error);
+  });
+
+  ytdlp.on('exit', (code) => {
+    if (code !== 0) console.log(`yt-dlp exited with code ${code}`);
+  });
+
   ffmpeg.on('error', error => {
     console.error('FFmpeg process error:', error);
   });
 
-  // Handle process exit
-  ffmpeg.on('exit', (code, signal) => {
-    if (code !== 0) {
-      console.log(`FFmpeg process exited with code ${code} and signal ${signal}`);
-    } else {
-      console.log('FFmpeg process completed successfully');
-    }
+  ffmpeg.on('exit', (code) => {
+    if (code !== 0) console.log(`FFmpeg exited with code ${code}`);
+    else console.log('FFmpeg completed successfully');
   });
 
-  // Handle stderr to see what FFmpeg is complaining about
   ffmpeg.stderr.on('data', (data) => {
-    const errorMessage = data.toString();
-    console.error('FFmpeg stderr:', errorMessage);
-    
-    // Check for specific error patterns
-    if (errorMessage.includes('403') || errorMessage.includes('Forbidden')) {
-      console.error('FFmpeg: Access forbidden - URL may have expired');
-    }
-    if (errorMessage.includes('404') || errorMessage.includes('Not Found')) {
-      console.error('FFmpeg: URL not found - URL may have expired');
+    const msg = data.toString();
+    if (msg.includes('403') || msg.includes('Forbidden')) {
+      console.error('FFmpeg: Access forbidden');
     }
   });
 
-  // Handle stdout errors
-  const stdout = ffmpeg.stdout;
-  stdout.on('error', error => {
+  ffmpeg.stdout.on('error', error => {
     console.error('FFmpeg stdout error:', error);
   });
 
-  return stdout;
+  // Clean up: if one process dies, kill the other
+  ytdlp.on('exit', () => { if (!ffmpeg.killed) ffmpeg.stdin.end(); });
+  ffmpeg.on('exit', () => { if (!ytdlp.killed) ytdlp.kill(); });
+
+  return ffmpeg.stdout;
 }
 
 async function playYouTubeUrlDirect(youtubeUrl: string, player: AudioPlayer, message: Message, title: string, isFirstSong: boolean = false) {
   try {
     console.log('Streaming directly from YouTube URL with FFmpeg:', youtubeUrl);
 
-    let stream: Readable;
-    try {
-      stream = await createYouTubeStream(youtubeUrl);
-    } catch (firstError) {
-      console.error('First stream attempt failed, retrying:', firstError);
-      try {
-        stream = await createYouTubeStream(youtubeUrl);
-      } catch (retryError) {
-        console.error('Retry also failed:', retryError);
-        (message.channel as any).send(`Failed to load: ${title}, skipping...`);
-        player.stop();
-        return;
-      }
-    }
+    const stream = createYouTubeStream(youtubeUrl);
 
     // Add error handling for the stream
     stream.on('error', (error: Error) => {
