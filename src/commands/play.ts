@@ -16,7 +16,7 @@ import youtubeDl, { Payload, Flags } from 'youtube-dl-exec';
 import { MusicQueue } from '../music/queue';
 import path from 'path';
 import { spawn } from 'child_process';
-import { Readable } from 'stream';
+import { Readable, PassThrough } from 'stream';
 import fs from 'fs';
 import { execSync } from 'child_process';
 
@@ -444,7 +444,7 @@ function createFfmpegStream(url: string): Readable {
     '-headers', 'Sec-Fetch-Site: cross-site',
     '-i', url,
     '-analyzeduration', '0',
-    '-probesize', '32',        // Minimize probe size to reduce memory usage
+    '-probesize', '32768',        // Minimize probe size to reduce memory usage
     '-loglevel', 'info',
     '-f', 's16le',
     '-ar', '48000',
@@ -507,7 +507,7 @@ function createYouTubeStream(youtubeUrl: string): Readable {
   const ffmpeg = spawn('ffmpeg', [
     '-i', 'pipe:0',
     '-analyzeduration', '0',
-    '-probesize', '32',
+    '-probesize', '32768',
     '-loglevel', 'warning',
     '-f', 's16le',
     '-ar', '48000',
@@ -572,7 +572,12 @@ function createYouTubeStream(youtubeUrl: string): Readable {
     }
   });
 
-  return ffmpeg.stdout;
+  // Pipe through a PassThrough stream so that buffered PCM data survives
+  // after FFmpeg exits (Node.js destroys child process stdio on exit)
+  const passthrough = new PassThrough();
+  ffmpeg.stdout.pipe(passthrough);
+
+  return passthrough;
 }
 
 async function playYouTubeUrlDirect(youtubeUrl: string, player: AudioPlayer, message: Message, title: string, isFirstSong: boolean = false) {
