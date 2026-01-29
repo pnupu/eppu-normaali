@@ -892,4 +892,3 @@ export function checkAndLeaveIfNeeded(client: Client, specificGuildId?: string) 
   }
 }
 
-
