@@ -517,7 +517,11 @@ function createYouTubeStream(youtubeUrl: string): Readable {
     'pipe:1'
   ]);
 
-  ytdlp.stdout.pipe(ffmpeg.stdin);
+  ytdlp.stdout.pipe(ffmpeg.stdin, { end: true });
+
+  ffmpeg.stdin.on('error', (error) => {
+    console.error('FFmpeg stdin error (ignored):', error.message);
+  });
 
   let ytdlpExited = false;
   let ffmpegExited = false;
