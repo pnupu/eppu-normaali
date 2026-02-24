@@ -2,7 +2,6 @@ import path from 'path';
 import { spawn } from 'child_process';
 import { Readable, PassThrough } from 'stream';
 import { PrimeHooks } from './play-types';
-import { getYtDlpAuthArgs, logYtDlpAuthContext } from './ytdlp-auth';
 
 const YTDLP_BIN = path.join(__dirname, '../../node_modules/youtube-dl-exec/bin/yt-dlp');
 
@@ -214,7 +213,6 @@ export function createFfmpegStream(url: string): Readable {
 
 export function createYouTubeStream(youtubeUrl: string): Readable {
   console.log('Piping yt-dlp -> ffmpeg for:', youtubeUrl);
-  logYtDlpAuthContext();
 
   const ytdlp = spawn(YTDLP_BIN, [
     '-f', 'bestaudio',
@@ -222,7 +220,6 @@ export function createYouTubeStream(youtubeUrl: string): Readable {
     '--quiet',
     '--no-warnings',
     '--no-progress',
-    ...getYtDlpAuthArgs(),
     youtubeUrl
   ]);
 

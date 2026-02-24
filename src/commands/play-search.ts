@@ -1,6 +1,5 @@
 import youtubeDl, { Flags } from 'youtube-dl-exec';
 import { SearchPayload, WebSearchResult } from './play-types';
-import { logYtDlpAuthContext, withYtDlpAuthFlags } from './ytdlp-auth';
 
 function formatYtDlpError(error: unknown): string {
   const err = error as { message?: string; stderr?: string; stdout?: string; exitCode?: number } | null;
@@ -25,7 +24,6 @@ export async function searchYouTubeFromWeb(
   const cappedLimit = Math.max(1, Math.min(10, limit));
   const startedAt = Date.now();
   console.log(`[yt-search] begin query="${trimmedQuery}" limit=${cappedLimit}`);
-  logYtDlpAuthContext();
 
   try {
     const flags: Flags = {
@@ -34,10 +32,7 @@ export async function searchYouTubeFromWeb(
       simulate: true,
     };
 
-    const payload = await youtubeDl(
-      `ytsearch${cappedLimit}:${trimmedQuery}`,
-      withYtDlpAuthFlags(flags)
-    ) as unknown as SearchPayload;
+    const payload = await youtubeDl(`ytsearch${cappedLimit}:${trimmedQuery}`, flags) as unknown as SearchPayload;
     const entries = Array.isArray(payload.entries) ? payload.entries : [];
 
     const extractVideoId = (entryId: string, entryUrl?: string): string | null => {

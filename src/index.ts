@@ -1,6 +1,6 @@
 import { ChatInputCommandInteraction, Client, Events, GatewayIntentBits, Guild, Message, MessageFlags, PermissionFlagsBits, SlashCommandBuilder } from 'discord.js';
 import { config } from 'dotenv';
-import { handlePlay, handlePause, handleResume, handleSkip, handleQueue, handleNukkumaan, handleHelp, handleCleanup, checkAndLeaveIfNeeded } from './commands/play.ts';
+import { handlePlay, handlePause, handleResume, handleSkip, handleQueue, handleNukkumaan, handleHelp, handleCleanup, checkAndLeaveIfNeeded } from './commands/play';
 import { startWebServer } from './web/server';
 import { createDiscordLoginLink } from './web/auth';
 

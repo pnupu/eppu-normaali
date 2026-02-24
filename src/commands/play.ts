@@ -18,7 +18,6 @@ import { queues } from './play-state';
 import { clearNextSongPrefetch, requestNextSongPrefetch } from './play-prefetch';
 import { playYouTubeUrl } from './play-playback';
 import { checkAndLeaveChannel } from './play-controls';
-import { logYtDlpAuthContext, withYtDlpAuthFlags } from './ytdlp-auth';
 
 export { searchYouTubeFromWeb } from './play-search';
 export type { WebSearchResult } from './play-types';
@@ -34,80 +33,6 @@ export {
   checkAndLeaveIfNeeded,
 } from './play-controls';
 
-function formatYtDlpError(error: unknown): string {
-  const err = error as { message?: string; stderr?: string; stdout?: string; exitCode?: number } | null;
-  if (!err) return 'unknown error';
-  const parts: string[] = [];
-  if (typeof err.exitCode === 'number') {
-    parts.push(`exitCode=${err.exitCode}`);
-  }
-  if (err.message) {
-    parts.push(`message=${err.message}`);
-  }
-  if (err.stderr) {
-    parts.push(`stderr=${String(err.stderr).trim()}`);
-  }
-  if (err.stdout) {
-    parts.push(`stdout=${String(err.stdout).trim()}`);
-  }
-  return parts.join(' | ') || 'unknown error';
-}
-
-function fallbackTitleFromUrl(url: string): string {
-  try {
-    const parsed = new URL(url);
-    const videoId = parsed.searchParams.get('v');
-    if (videoId) return `YouTube ${videoId}`;
-  } catch {
-    // ignore
-  }
-  return 'YouTube video';
-}
-
-async function fetchVideoInfoWithLogging(
-  url: string,
-  context: string
-): Promise<{ title: string; degraded: boolean }> {
-  const startedAt = Date.now();
-  const firstFlags: Flags = {
-    dumpSingleJson: true,
-    format: 'bestaudio',
-    simulate: true,
-  };
-  const secondFlags: Flags = {
-    dumpSingleJson: true,
-    simulate: true,
-  };
-
-  console.log(`[yt-fetch] ${context} begin url=${url}`);
-  logYtDlpAuthContext();
-
-  try {
-    const videoInfo = await youtubeDl(url, withYtDlpAuthFlags(firstFlags)) as unknown as ExtendedPayload;
-    if (!videoInfo.title) {
-      throw new Error('Missing title in yt-dlp response');
-    }
-    console.log(`[yt-fetch] ${context} success mode=bestaudio title="${videoInfo.title}" in ${Date.now() - startedAt}ms`);
-    return { title: videoInfo.title, degraded: false };
-  } catch (error) {
-    console.warn(`[yt-fetch] ${context} bestaudio failed: ${formatYtDlpError(error)}`);
-  }
-
-  try {
-    const videoInfo = await youtubeDl(url, withYtDlpAuthFlags(secondFlags)) as unknown as ExtendedPayload;
-    if (!videoInfo.title) {
-      throw new Error('Missing title in fallback yt-dlp response');
-    }
-    console.log(`[yt-fetch] ${context} success mode=fallback title="${videoInfo.title}" in ${Date.now() - startedAt}ms`);
-    return { title: videoInfo.title, degraded: true };
-  } catch (error) {
-    console.error(`[yt-fetch] ${context} fallback failed: ${formatYtDlpError(error)}`);
-  }
-
-  const fallbackTitle = fallbackTitleFromUrl(url);
-  console.warn(`[yt-fetch] ${context} using synthetic title="${fallbackTitle}"`);
-  return { title: fallbackTitle, degraded: true };
-}
 function createWebPlaybackMessage(client: Client, guild: any, requestedBy: string): Message {
   const botUserId = client.user?.id || 'eppu-web';
 
@@ -213,13 +138,22 @@ export async function addSongFromWeb(
   }
 
   try {
-    const { title } = await fetchVideoInfoWithLogging(url, `web-add guild=${guildId}`);
+    const flags: Flags = {
+      dumpSingleJson: true,
+      format: 'bestaudio',
+      simulate: true,
+    };
+
+    const videoInfo = await youtubeDl(url, flags) as unknown as ExtendedPayload;
+    if (!videoInfo.title) {
+      return { success: false, error: 'Could not get video info' };
+    }
 
     const hadCurrentSongBeforeAdd = !!queue.getCurrentSong();
     queue.addSong({
-      title,
-      url: url,
-      requestedBy: requestedBy
+      title: videoInfo.title,
+      url,
+      requestedBy,
     });
 
     if (!playbackMessage) {
@@ -242,26 +176,25 @@ export async function addSongFromWeb(
       if (!playbackMessage) {
         return { success: false, error: 'Guild not found for playback start.' };
       }
-      playYouTubeUrl(url, queue.getPlayer(), playbackMessage, title, true);
+      playYouTubeUrl(url, queue.getPlayer(), playbackMessage, videoInfo.title, true);
     }
 
     return { success: true };
   } catch (error) {
-    console.error(`[yt-fetch] web-add unexpected failure url=${url} error=${formatYtDlpError(error)}`);
+    console.error('[web-voice] Failed to fetch video info:', error);
     return { success: false, error: 'Failed to fetch video info' };
   }
 }
 
 export async function handlePlay(message: Message, url: string) {
   console.log('Starting handlePlay with URL:', url);
-  
-  // Check disk space before proceeding
+
   const diskInfo = checkDiskSpace();
   if (diskInfo.percentage > 95) {
     message.reply('⚠️ Error: Disk space critically low! Cannot play music. Please free up some space.');
     return;
   }
-  
+
   const defaultVoiceChannelId = process.env.DEFAULT_VOICE_CHANNEL_ID?.trim();
   const memberVoiceChannel = message.member?.voice.channel;
   const configuredDefaultChannel = defaultVoiceChannelId
@@ -288,49 +221,53 @@ export async function handlePlay(message: Message, url: string) {
   console.log('Queue exists:', !!queue);
 
   try {
-    console.log(`[play] Resolving video metadata url=${url}`);
+    console.log('Fetching PO token');
 
-    // Check if URL is a playlist
     const isPlaylist = url.includes('playlist') || url.includes('list=');
-    
     if (isPlaylist) {
       await handlePlaylist(message, url, queue, targetVoiceChannel.id);
       return;
     }
-    
-    // Handle single video
-    const { title } = await fetchVideoInfoWithLogging(url, `play guild=${guildId}`);
+
+    const flags: Flags = {
+      dumpSingleJson: true,
+      format: 'bestaudio',
+      simulate: true,
+    };
+
+    const videoInfo = await youtubeDl(url, flags) as unknown as ExtendedPayload;
+
+    if (!videoInfo.requested_downloads?.[0]?.url) {
+      console.error('No audio URL found in video info');
+      throw new Error('No audio URL found');
+    }
 
     const isFirstSong = !queue;
-    
+
     if (!queue) {
       queue = await createQueueAndConnection(message, targetVoiceChannel.id);
     }
 
-    console.log('Adding song to queue:', title);
-    
-    // Store the original YouTube URL instead of the direct audio URL
-    // We'll get a fresh audio URL when we actually play it
+    console.log('Adding song to queue:', videoInfo.title);
+
     const queueItem = {
-      title,
-      url: url, // Store original YouTube URL
-      requestedBy: message.author.username
+      title: videoInfo.title,
+      url,
+      requestedBy: message.author.username,
     };
 
     const hadCurrentSongBeforeAdd = !!queue.getCurrentSong();
     queue.addSong(queueItem);
     requestNextSongPrefetch(message);
-    
-    // If this is the current song (no other song playing), start playing immediately
+
     if (!hadCurrentSongBeforeAdd && queue.getCurrentSong()?.url === queueItem.url) {
-      // Start playing immediately with fresh URL - no delay
       playYouTubeUrl(queueItem.url, queue.getPlayer(), message, queueItem.title, isFirstSong);
     } else {
-      await sendOrEditMusicMessage(message, `Added to queue: ${queueItem.title}`);
+      await sendOrEditMusicMessage(message, `Added to queue: ${videoInfo.title}`);
     }
 
   } catch (error) {
-    console.error(`[play] command error url=${url} error=${formatYtDlpError(error)}`);
+    console.error('Play command error:', error);
     message.reply('Error playing the video!');
   }
 }
@@ -338,36 +275,30 @@ export async function handlePlay(message: Message, url: string) {
 async function handlePlaylist(message: Message, url: string, existingQueue?: MusicQueue, channelId?: string) {
   try {
     message.reply('Processing playlist. This may take a moment...');
-    
-    // Get playlist info
+
     const playlistFlags: Flags = {
       dumpSingleJson: true,
       flatPlaylist: true,
-      simulate: true,    // Don't download, just get info
+      simulate: true,
     };
-    
-    console.log(`[yt-fetch] playlist begin url=${url}`);
-    const playlistInfo = await youtubeDl(url, withYtDlpAuthFlags(playlistFlags)) as any;
-    console.log(
-      `[yt-fetch] playlist success url=${url} entries=${Array.isArray(playlistInfo?.entries) ? playlistInfo.entries.length : 0}`
-    );
-    
+
+    const playlistInfo = await youtubeDl(url, playlistFlags) as any;
+
     if (!playlistInfo || !playlistInfo.entries || !Array.isArray(playlistInfo.entries)) {
       throw new Error('Failed to get playlist information');
     }
-    
+
     const entries = playlistInfo.entries as PlaylistEntry[];
-    
+
     if (entries.length === 0) {
       message.reply('No videos found in the playlist.');
       return;
     }
-    
-    // Create queue if it doesn't exist
+
     const guildId = message.guild!.id;
     let queue = existingQueue || queues.get(guildId);
     const isFirstSong = !queue;
-    
+
     if (!queue) {
       const targetChannelId = channelId || message.member?.voice.channel?.id;
       console.log(
@@ -380,46 +311,46 @@ async function handlePlaylist(message: Message, url: string, existingQueue?: Mus
       }
       queue = await createQueueAndConnection(message, targetChannelId);
     }
-    
-    // Process each video in the playlist
+
     let addedCount = 0;
     const totalVideos = entries.length;
-    
+
     message.reply(`Found ${totalVideos} videos in the playlist. Adding to queue...`);
-    
-    // Add YouTube URLs to queue (we'll get fresh audio URLs when playing)
+
     for (const entry of entries) {
       try {
-        const { title } = await fetchVideoInfoWithLogging(
-          entry.url,
-          `playlist-entry guild=${guildId}`
-        );
-        const queueItem = {
-          title,
-          url: entry.url, // Store YouTube URL, not direct audio URL
-          requestedBy: message.author.username
+        const videoFlags: Flags = {
+          dumpSingleJson: true,
+          simulate: true,
         };
 
-        const hadCurrentSongBeforeAdd = !!queue.getCurrentSong();
-        queue.addSong(queueItem);
-        addedCount++;
+        const videoInfo = await youtubeDl(entry.url, videoFlags) as unknown as ExtendedPayload;
 
-        // Start playing the first song if it's the current song
-        if (!hadCurrentSongBeforeAdd && queue.getCurrentSong()?.url === queueItem.url) {
-          playYouTubeUrl(queueItem.url, queue.getPlayer(), message, queueItem.title, isFirstSong && addedCount === 1);
+        if (videoInfo.title) {
+          const queueItem = {
+            title: videoInfo.title,
+            url: entry.url,
+            requestedBy: message.author.username,
+          };
+
+          const hadCurrentSongBeforeAdd = !!queue.getCurrentSong();
+          queue.addSong(queueItem);
+          addedCount++;
+
+          if (!hadCurrentSongBeforeAdd && queue.getCurrentSong()?.url === queueItem.url) {
+            playYouTubeUrl(queueItem.url, queue.getPlayer(), message, queueItem.title, isFirstSong && addedCount === 1);
+          }
         }
       } catch (error) {
-        console.error(`[yt-fetch] playlist entry failed url=${entry.url} error=${formatYtDlpError(error)}`);
-        // Continue with next video even if one fails
+        console.error(`Error processing playlist video ${entry.url}:`, error);
       }
     }
 
     requestNextSongPrefetch(message);
-    
     message.reply(`Successfully added ${addedCount} out of ${totalVideos} videos from the playlist to the queue.`);
-    
+
   } catch (error) {
-    console.error(`[yt-fetch] playlist processing error url=${url} error=${formatYtDlpError(error)}`);
+    console.error('Playlist processing error:', error);
     message.reply('Error processing the playlist!');
   }
 }
@@ -430,10 +361,10 @@ async function createQueueAndConnection(message: Message, channelId: string): Pr
     + `channel=${voiceChannelLabel(message, channelId)}`
   );
   const guildId = message.guild!.id;
-  
+
   const connection = joinVoiceChannel({
     channelId,
-    guildId: guildId,
+    guildId,
     adapterCreator: message.guild!.voiceAdapterCreator as DiscordGatewayAdapterCreator,
   });
 
@@ -451,13 +382,10 @@ async function createQueueAndConnection(message: Message, channelId: string): Pr
         entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
         entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
       ]);
-      // Reconnecting successfully
       console.log('Voice connection reconnecting...');
     } catch {
-      // Reconnect failed, destroy the connection
       console.log('Voice connection reconnect failed, destroying connection');
       connection.destroy();
-      const guildId = message.guild!.id;
       if (queues.has(guildId)) {
         queues.delete(guildId);
         clearGuildUiTracking(guildId);
@@ -476,7 +404,7 @@ async function createQueueAndConnection(message: Message, channelId: string): Pr
   });
 
   const player = createAudioPlayer();
-  
+
   player.on('error', error => {
     console.error('Audio Player Error:', error);
   });
@@ -520,7 +448,7 @@ async function createQueueAndConnection(message: Message, channelId: string): Pr
 
   const queue = new MusicQueue(player);
   queues.set(guildId, queue);
-  
+
   connection.subscribe(player);
 
   try {
@@ -544,15 +472,13 @@ async function createQueueAndConnection(message: Message, channelId: string): Pr
     } else {
       clearStartupTrace(guildId);
       clearNextSongPrefetch(guildId);
-      // Wait before disconnecting so users can queue more songs
       setTimeout(() => {
-        // Re-check: if a song was added during the delay, don't leave
         if (!queue.getCurrentSong() && !queue.hasNextSong()) {
           checkAndLeaveChannel(guildId, message.client);
         }
-      }, 60_000); // Wait 60 seconds before leaving
+      }, 60_000);
     }
   });
-  
+
   return queue;
 }

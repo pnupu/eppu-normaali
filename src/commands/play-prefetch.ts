@@ -5,7 +5,6 @@ import fs from 'fs';
 import { createHash } from 'crypto';
 import { NextSongPrefetch } from './play-types';
 import { queues } from './play-state';
-import { getYtDlpAuthArgs, logYtDlpAuthContext } from './ytdlp-auth';
 
 const PREFETCH_DIR = path.join(__dirname, '../../tmp/prefetch');
 const YTDLP_BIN = path.join(__dirname, '../../node_modules/youtube-dl-exec/bin/yt-dlp');
@@ -110,12 +109,10 @@ function startNextSongPrefetch(message: Message): void {
   removePrefetchFile(filePath);
 
   console.log(`[prefetch] Starting next-song prefetch guild=${message.guild?.name} url=${nextSong.url}`);
-  logYtDlpAuthContext();
   const process = spawn(YTDLP_BIN, [
     '-f', 'bestaudio',
     '--no-warnings',
     '--no-progress',
-    ...getYtDlpAuthArgs(),
     '-o', filePath,
     nextSong.url,
   ]);

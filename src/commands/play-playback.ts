@@ -27,8 +27,6 @@ async function playPrefetchedSong(
   isFirstSong: boolean = false
 ) {
   try {
-    let primedBytes = 0;
-    let primeReason: 'bytes' | 'timeout' | 'eof' = 'eof';
     const trace = beginStartupTrace(message, title, prefetched.url, 'prefetched');
     console.log(`[prefetch] Playing prefetched file guild=${message.guild?.name} title="${title}"`);
     const baseStream = createPrefetchedFileStream(prefetched.filePath, removePrefetchFile);
@@ -46,8 +44,6 @@ async function playPrefetchedSong(
         logStartupTrace(trace, 'prime-first-chunk', `bytes=${bytes}`);
       },
       onPrimed: (bytes, reason) => {
-        primedBytes = bytes;
-        primeReason = reason;
         if (!trace) return;
         trace.primeReadyAt = Date.now();
         trace.primeBytes = bytes;
@@ -55,10 +51,6 @@ async function playPrefetchedSong(
         logStartupTrace(trace, 'prime-ready', `bytes=${bytes}, reason=${reason}`);
       },
     });
-
-    if (primedBytes <= 0) {
-      throw new Error(`Prefetched stream produced no audio bytes (reason=${primeReason})`);
-    }
 
     logStartupTrace(trace, 'create-audio-resource');
     const withInlineVolume = inlineVolumeEnabled();
@@ -88,8 +80,6 @@ async function playPrefetchedSong(
 
 async function playYouTubeUrlDirect(youtubeUrl: string, player: AudioPlayer, message: Message, title: string, isFirstSong: boolean = false) {
   try {
-    let primedBytes = 0;
-    let primeReason: 'bytes' | 'timeout' | 'eof' = 'eof';
     const trace = beginStartupTrace(message, title, youtubeUrl, 'live');
     console.log('Streaming directly from YouTube URL with FFmpeg:', youtubeUrl);
 
@@ -109,8 +99,6 @@ async function playYouTubeUrlDirect(youtubeUrl: string, player: AudioPlayer, mes
         logStartupTrace(trace, 'prime-first-chunk', `bytes=${bytes}`);
       },
       onPrimed: (bytes, reason) => {
-        primedBytes = bytes;
-        primeReason = reason;
         if (!trace) return;
         trace.primeReadyAt = Date.now();
         trace.primeBytes = bytes;
@@ -118,10 +106,6 @@ async function playYouTubeUrlDirect(youtubeUrl: string, player: AudioPlayer, mes
         logStartupTrace(trace, 'prime-ready', `bytes=${bytes}, reason=${reason}`);
       },
     });
-
-    if (primedBytes <= 0) {
-      throw new Error(`Live stream produced no audio bytes (reason=${primeReason})`);
-    }
 
     logStartupTrace(trace, 'create-audio-resource');
     const withInlineVolume = inlineVolumeEnabled();
