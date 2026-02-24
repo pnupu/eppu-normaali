@@ -1,199 +1,254 @@
 // src/commands/play.ts
-import { Message, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, Client } from 'discord.js';
+import { Client, Message } from 'discord.js';
 import {
   joinVoiceChannel,
   createAudioPlayer,
-  createAudioResource,
   DiscordGatewayAdapterCreator,
-  StreamType,
   AudioPlayerStatus,
-  AudioPlayer,
   VoiceConnectionStatus,
-  getVoiceConnection,
   entersState
 } from '@discordjs/voice';
-import youtubeDl, { Payload, Flags } from 'youtube-dl-exec';
+import youtubeDl, { Flags } from 'youtube-dl-exec';
 import { MusicQueue } from '../music/queue';
-import path from 'path';
-import { spawn } from 'child_process';
-import { Readable, PassThrough } from 'stream';
-import fs from 'fs';
-import { execSync } from 'child_process';
+import { ExtendedPayload, PlaylistEntry } from './play-types';
+import { clearStartupTrace, getStartupTrace, logStartupTrace } from './play-startup';
+import { checkDiskSpace } from './play-maintenance';
+import { clearGuildUiTracking, sendOrEditMusicMessage, voiceChannelLabel } from './play-ui';
+import { queues } from './play-state';
+import { clearNextSongPrefetch, requestNextSongPrefetch } from './play-prefetch';
+import { playYouTubeUrl } from './play-playback';
+import { checkAndLeaveChannel } from './play-controls';
+import { logYtDlpAuthContext, withYtDlpAuthFlags } from './ytdlp-auth';
 
-interface ExtendedRequestedDownload {
-  url: string;
+export { searchYouTubeFromWeb } from './play-search';
+export type { WebSearchResult } from './play-types';
+export { queues, getVolume, setVolume } from './play-state';
+export {
+  handlePause,
+  handleResume,
+  handleSkip,
+  handleQueue,
+  handleHelp,
+  handleCleanup,
+  handleNukkumaan,
+  checkAndLeaveIfNeeded,
+} from './play-controls';
+
+function formatYtDlpError(error: unknown): string {
+  const err = error as { message?: string; stderr?: string; stdout?: string; exitCode?: number } | null;
+  if (!err) return 'unknown error';
+  const parts: string[] = [];
+  if (typeof err.exitCode === 'number') {
+    parts.push(`exitCode=${err.exitCode}`);
+  }
+  if (err.message) {
+    parts.push(`message=${err.message}`);
+  }
+  if (err.stderr) {
+    parts.push(`stderr=${String(err.stderr).trim()}`);
+  }
+  if (err.stdout) {
+    parts.push(`stdout=${String(err.stdout).trim()}`);
+  }
+  return parts.join(' | ') || 'unknown error';
 }
 
-interface ExtendedPayload extends Omit<Payload, 'requested_downloads'> {
-  requested_downloads: ExtendedRequestedDownload[];
+function fallbackTitleFromUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const videoId = parsed.searchParams.get('v');
+    if (videoId) return `YouTube ${videoId}`;
+  } catch {
+    // ignore
+  }
+  return 'YouTube video';
 }
 
-interface PlaylistEntry {
-  title: string;
-  url: string;
-  id: string;
-}
+async function fetchVideoInfoWithLogging(
+  url: string,
+  context: string
+): Promise<{ title: string; degraded: boolean }> {
+  const startedAt = Date.now();
+  const firstFlags: Flags = {
+    dumpSingleJson: true,
+    format: 'bestaudio',
+    simulate: true,
+  };
+  const secondFlags: Flags = {
+    dumpSingleJson: true,
+    simulate: true,
+  };
 
-export const queues = new Map<string, MusicQueue>();
+  console.log(`[yt-fetch] ${context} begin url=${url}`);
+  logYtDlpAuthContext();
 
-// Per-guild volume tracking (0-100)
-const guildVolumes = new Map<string, number>();
-
-export function getVolume(guildId: string): number {
-  return guildVolumes.get(guildId) ?? 50;
-}
-
-export function setVolume(guildId: string, volume: number): void {
-  guildVolumes.set(guildId, Math.max(0, Math.min(100, volume)));
-}
-
-export async function addSongFromWeb(guildId: string, url: string, requestedBy: string): Promise<{ success: boolean; error?: string }> {
-  const queue = queues.get(guildId);
-  if (!queue) {
-    return { success: false, error: 'No active queue in this guild. Start playing from Discord first.' };
+  try {
+    const videoInfo = await youtubeDl(url, withYtDlpAuthFlags(firstFlags)) as unknown as ExtendedPayload;
+    if (!videoInfo.title) {
+      throw new Error('Missing title in yt-dlp response');
+    }
+    console.log(`[yt-fetch] ${context} success mode=bestaudio title="${videoInfo.title}" in ${Date.now() - startedAt}ms`);
+    return { title: videoInfo.title, degraded: false };
+  } catch (error) {
+    console.warn(`[yt-fetch] ${context} bestaudio failed: ${formatYtDlpError(error)}`);
   }
 
   try {
-    const flags: Flags = {
-      dumpSingleJson: true,
-      format: 'bestaudio',
-      simulate: true,
-    };
-
-    const videoInfo = await youtubeDl(url, flags) as unknown as ExtendedPayload;
-
+    const videoInfo = await youtubeDl(url, withYtDlpAuthFlags(secondFlags)) as unknown as ExtendedPayload;
     if (!videoInfo.title) {
-      return { success: false, error: 'Could not get video info' };
+      throw new Error('Missing title in fallback yt-dlp response');
+    }
+    console.log(`[yt-fetch] ${context} success mode=fallback title="${videoInfo.title}" in ${Date.now() - startedAt}ms`);
+    return { title: videoInfo.title, degraded: true };
+  } catch (error) {
+    console.error(`[yt-fetch] ${context} fallback failed: ${formatYtDlpError(error)}`);
+  }
+
+  const fallbackTitle = fallbackTitleFromUrl(url);
+  console.warn(`[yt-fetch] ${context} using synthetic title="${fallbackTitle}"`);
+  return { title: fallbackTitle, degraded: true };
+}
+function createWebPlaybackMessage(client: Client, guild: any, requestedBy: string): Message {
+  const botUserId = client.user?.id || 'eppu-web';
+
+  const fakeBotMessage = async () => ({
+    id: `web-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    author: { id: botUserId },
+    edit: async () => undefined,
+  });
+
+  const fakeChannel: any = {
+    send: async () => fakeBotMessage(),
+    messages: {
+      fetch: async () => ({ first: () => undefined }),
+    },
+  };
+
+  return {
+    guild,
+    member: {
+      voice: { channel: null },
+      permissions: { has: () => false },
+    },
+    author: {
+      id: `web-${requestedBy}`,
+      username: requestedBy || 'Web UI',
+      bot: false,
+    },
+    channel: fakeChannel,
+    client,
+    reply: async (payload: any) => {
+      const content = typeof payload === 'string' ? payload : payload?.content;
+      if (content) {
+        console.log(`[web] ${content}`);
+      }
+      return fakeBotMessage();
+    },
+  } as unknown as Message;
+}
+
+export function refreshNextSongPrefetch(client: Client, guildId: string): void {
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) {
+    clearNextSongPrefetch(guildId);
+    return;
+  }
+  const message = createWebPlaybackMessage(client, guild, 'Web UI');
+  requestNextSongPrefetch(message);
+}
+
+async function resolveDefaultVoiceChannelForGuild(client: Client, guildId: string): Promise<{ guild: any; channelId: string; error?: string }> {
+  const guild = client.guilds.cache.get(guildId) || await client.guilds.fetch(guildId).catch(() => null);
+  if (!guild) {
+    return { guild: null, channelId: '', error: 'Guild not found for web playback.' };
+  }
+
+  const defaultVoiceChannelId = process.env.DEFAULT_VOICE_CHANNEL_ID?.trim();
+  if (!defaultVoiceChannelId) {
+    return { guild, channelId: '', error: 'DEFAULT_VOICE_CHANNEL_ID is not configured.' };
+  }
+
+  const channel = guild.channels.cache.get(defaultVoiceChannelId)
+    || await guild.channels.fetch(defaultVoiceChannelId).catch(() => null);
+  if (!channel || !channel.isVoiceBased()) {
+    return {
+      guild,
+      channelId: '',
+      error: `DEFAULT_VOICE_CHANNEL_ID (${defaultVoiceChannelId}) is not a valid voice channel in ${guild.name}.`,
+    };
+  }
+
+  return { guild, channelId: defaultVoiceChannelId };
+}
+
+export async function addSongFromWeb(
+  client: Client,
+  guildId: string,
+  url: string,
+  requestedBy: string
+): Promise<{ success: boolean; error?: string }> {
+  let queue = queues.get(guildId);
+  let playbackMessage: Message | null = null;
+  let resolvedGuild: any = null;
+
+  if (!queue) {
+    const resolved = await resolveDefaultVoiceChannelForGuild(client, guildId);
+    if (resolved.error || !resolved.channelId) {
+      return { success: false, error: resolved.error || 'Could not resolve default voice channel.' };
     }
 
+    resolvedGuild = resolved.guild;
+    playbackMessage = createWebPlaybackMessage(client, resolvedGuild, requestedBy);
+    console.log(
+      `[web-voice] Bootstrapping queue for guild=${resolved.guild.name} (${guildId}) `
+      + `channelId=${resolved.channelId}`
+    );
+
+    try {
+      queue = await createQueueAndConnection(playbackMessage, resolved.channelId);
+    } catch (error) {
+      console.error('[web-voice] Failed to create queue/connection from web:', error);
+      return { success: false, error: 'Could not join the default voice channel.' };
+    }
+  }
+
+  try {
+    const { title } = await fetchVideoInfoWithLogging(url, `web-add guild=${guildId}`);
+
+    const hadCurrentSongBeforeAdd = !!queue.getCurrentSong();
     queue.addSong({
-      title: videoInfo.title,
+      title,
       url: url,
       requestedBy: requestedBy
     });
 
+    if (!playbackMessage) {
+      if (!resolvedGuild) {
+        resolvedGuild = client.guilds.cache.get(guildId) || await client.guilds.fetch(guildId).catch(() => null);
+      }
+      if (resolvedGuild) {
+        playbackMessage = createWebPlaybackMessage(client, resolvedGuild, requestedBy);
+      }
+    }
+
+    if (playbackMessage) {
+      requestNextSongPrefetch(playbackMessage);
+    }
+
+    if (!hadCurrentSongBeforeAdd && queue.getCurrentSong()?.url === url) {
+      if (!playbackMessage && resolvedGuild) {
+        playbackMessage = createWebPlaybackMessage(client, resolvedGuild, requestedBy);
+      }
+      if (!playbackMessage) {
+        return { success: false, error: 'Guild not found for playback start.' };
+      }
+      playYouTubeUrl(url, queue.getPlayer(), playbackMessage, title, true);
+    }
+
     return { success: true };
   } catch (error) {
+    console.error(`[yt-fetch] web-add unexpected failure url=${url} error=${formatYtDlpError(error)}`);
     return { success: false, error: 'Failed to fetch video info' };
-  }
-}
-const COOKIES_PATH = path.join(__dirname, '../../cookies.txt');
-
-// Track the last bot message for each guild
-const lastBotMessages = new Map<string, Message>();
-// Track if we've already replied to the original play message
-const hasRepliedToPlay = new Map<string, boolean>();
-
-// Check disk space and warn if low
-function checkDiskSpace(): { available: number; percentage: number } {
-  try {
-    const output = execSync('df -h / | tail -1', { encoding: 'utf8' });
-    const parts = output.trim().split(/\s+/);
-    const percentage = parseInt(parts[4].replace('%', ''));
-    const available = parts[3];
-    
-    if (percentage > 90) {
-      console.warn(`⚠️  Disk space warning: ${percentage}% used, ${available} available`);
-    }
-    
-    return { available: parseFloat(available), percentage };
-  } catch (error) {
-    console.error('Could not check disk space:', error);
-    return { available: 0, percentage: 0 };
-  }
-}
-
-// Clean up log files to prevent them from growing too large
-function cleanupLogFiles() {
-  try {
-    const logFiles = ['eppu-out.log', 'eppu-error.log'];
-    const maxSize = 10 * 1024 * 1024; // 10MB
-    
-    logFiles.forEach(logFile => {
-      const logPath = path.join(__dirname, '../../', logFile);
-      if (fs.existsSync(logPath)) {
-        const stats = fs.statSync(logPath);
-        if (stats.size > maxSize) {
-          console.log(`Log file ${logFile} is ${(stats.size / 1024 / 1024).toFixed(2)}MB, truncating...`);
-          fs.truncateSync(logPath, 0);
-        }
-      }
-    });
-  } catch (error) {
-    console.error('Error cleaning up log files:', error);
-  }
-}
-
-async function getPoToken(): Promise<string> {
-  try {
-    const response = await fetch('http://localhost:8080/token');
-    const data = await response.text();
-    return data.trim();
-  } catch (error) {
-    console.error('Failed to fetch PO token:', error);
-    throw error;
-  }
-}
-
-function createMusicControls() {
-  const row = new ActionRowBuilder<ButtonBuilder>()
-    .addComponents(
-      new ButtonBuilder()
-        .setCustomId('pause')
-        .setLabel('⏸️ Pause')
-        .setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder()
-        .setCustomId('resume')
-        .setLabel('▶️ Resume')
-        .setStyle(ButtonStyle.Success),
-      new ButtonBuilder()
-        .setCustomId('skip')
-        .setLabel('⏭️ Skip')
-        .setStyle(ButtonStyle.Primary)
-    );
-  
-  return row;
-}
-
-async function sendOrEditMusicMessage(message: Message, content: string, isFirstSong: boolean = false) {
-  const guildId = message.guild!.id;
-  const controls = createMusicControls();
-  
-  try {
-    // If this is the first song and we haven't replied yet, reply to the original message
-    if (isFirstSong && !hasRepliedToPlay.get(guildId)) {
-      const reply = await message.reply({ content, components: [controls] });
-      lastBotMessages.set(guildId, reply);
-      hasRepliedToPlay.set(guildId, true);
-      return;
-    }
-    
-    // Check if we have a last bot message and if it's still the latest in the channel
-    const lastBotMessage = lastBotMessages.get(guildId);
-    if (lastBotMessage) {
-      try {
-        // Fetch the latest messages to see if our message is still the latest
-        const latestMessages = await message.channel.messages.fetch({ limit: 1 });
-        const latestMessage = latestMessages.first();
-        
-        if (latestMessage && latestMessage.id === lastBotMessage.id && latestMessage.author.id === message.client.user!.id) {
-          // Our message is still the latest, edit it
-          await lastBotMessage.edit({ content, components: [controls] });
-          return;
-        }
-      } catch (error) {
-        console.log('Could not fetch or edit last message, sending new one');
-      }
-    }
-    
-    // Send a new message
-    const newMessage = await (message.channel as any).send({ content, components: [controls] });
-    lastBotMessages.set(guildId, newMessage);
-    
-  } catch (error) {
-    console.error('Error sending/editing music message:', error);
-    // Fallback to simple message
-    (message.channel as any).send(content);
   }
 }
 
@@ -207,9 +262,24 @@ export async function handlePlay(message: Message, url: string) {
     return;
   }
   
-  if (!message.member?.voice.channel) {
-    console.log('User not in voice channel');
-    message.reply('You need to be in a voice channel!');
+  const defaultVoiceChannelId = process.env.DEFAULT_VOICE_CHANNEL_ID?.trim();
+  const memberVoiceChannel = message.member?.voice.channel;
+  const configuredDefaultChannel = defaultVoiceChannelId
+    ? message.guild?.channels.cache.get(defaultVoiceChannelId)
+    : null;
+  const targetVoiceChannel = memberVoiceChannel
+    ?? (configuredDefaultChannel && configuredDefaultChannel.isVoiceBased() ? configuredDefaultChannel : null);
+
+  console.log(
+    `[voice] Play requested guild=${message.guild?.name} (${message.guild?.id}) `
+    + `memberChannel=${voiceChannelLabel(message, memberVoiceChannel?.id)} `
+    + `defaultChannelConfigured=${voiceChannelLabel(message, defaultVoiceChannelId)} `
+    + `selectedChannel=${voiceChannelLabel(message, targetVoiceChannel?.id)}`
+  );
+
+  if (!targetVoiceChannel) {
+    console.log('[voice] User not in voice channel and no valid default channel configured');
+    message.reply('You need to be in a voice channel (or configure DEFAULT_VOICE_CHANNEL_ID).');
     return;
   }
 
@@ -218,64 +288,54 @@ export async function handlePlay(message: Message, url: string) {
   console.log('Queue exists:', !!queue);
 
   try {
-    console.log('Fetching PO token');
-    
+    console.log(`[play] Resolving video metadata url=${url}`);
+
     // Check if URL is a playlist
     const isPlaylist = url.includes('playlist') || url.includes('list=');
     
     if (isPlaylist) {
-      await handlePlaylist(message, url, queue);
+      await handlePlaylist(message, url, queue, targetVoiceChannel.id);
       return;
     }
     
     // Handle single video
-    console.log('Fetching video info with token');
-    const flags: Flags = {
-      dumpSingleJson: true,
-      format: 'bestaudio',
-      simulate: true,    // Don't download, just simulate
-    };
-
-    const videoInfo = await youtubeDl(url, flags) as unknown as ExtendedPayload;
-
-    if (!videoInfo.requested_downloads?.[0]?.url) {
-      console.error('No audio URL found in video info');
-      throw new Error('No audio URL found');
-    }
+    const { title } = await fetchVideoInfoWithLogging(url, `play guild=${guildId}`);
 
     const isFirstSong = !queue;
     
     if (!queue) {
-      queue = await createQueueAndConnection(message);
+      queue = await createQueueAndConnection(message, targetVoiceChannel.id);
     }
 
-    console.log('Adding song to queue:', videoInfo.title);
+    console.log('Adding song to queue:', title);
     
     // Store the original YouTube URL instead of the direct audio URL
     // We'll get a fresh audio URL when we actually play it
     const queueItem = {
-      title: videoInfo.title,
+      title,
       url: url, // Store original YouTube URL
       requestedBy: message.author.username
     };
 
+    const hadCurrentSongBeforeAdd = !!queue.getCurrentSong();
     queue.addSong(queueItem);
+    requestNextSongPrefetch(message);
     
     // If this is the current song (no other song playing), start playing immediately
-    if (queue.getCurrentSong()?.url === queueItem.url) {
+    if (!hadCurrentSongBeforeAdd && queue.getCurrentSong()?.url === queueItem.url) {
       // Start playing immediately with fresh URL - no delay
       playYouTubeUrl(queueItem.url, queue.getPlayer(), message, queueItem.title, isFirstSong);
     } else {
-      await sendOrEditMusicMessage(message, `Added to queue: ${videoInfo.title}`);
+      await sendOrEditMusicMessage(message, `Added to queue: ${queueItem.title}`);
     }
 
   } catch (error) {
-    console.error('Play command error:', error);
+    console.error(`[play] command error url=${url} error=${formatYtDlpError(error)}`);
     message.reply('Error playing the video!');
   }
 }
 
-async function handlePlaylist(message: Message, url: string, existingQueue?: MusicQueue) {
+async function handlePlaylist(message: Message, url: string, existingQueue?: MusicQueue, channelId?: string) {
   try {
     message.reply('Processing playlist. This may take a moment...');
     
@@ -286,7 +346,11 @@ async function handlePlaylist(message: Message, url: string, existingQueue?: Mus
       simulate: true,    // Don't download, just get info
     };
     
-    const playlistInfo = await youtubeDl(url, playlistFlags) as any;
+    console.log(`[yt-fetch] playlist begin url=${url}`);
+    const playlistInfo = await youtubeDl(url, withYtDlpAuthFlags(playlistFlags)) as any;
+    console.log(
+      `[yt-fetch] playlist success url=${url} entries=${Array.isArray(playlistInfo?.entries) ? playlistInfo.entries.length : 0}`
+    );
     
     if (!playlistInfo || !playlistInfo.entries || !Array.isArray(playlistInfo.entries)) {
       throw new Error('Failed to get playlist information');
@@ -305,7 +369,16 @@ async function handlePlaylist(message: Message, url: string, existingQueue?: Mus
     const isFirstSong = !queue;
     
     if (!queue) {
-      queue = await createQueueAndConnection(message);
+      const targetChannelId = channelId || message.member?.voice.channel?.id;
+      console.log(
+        `[voice] Playlist queue creation target channel=${voiceChannelLabel(message, targetChannelId)} `
+        + `source=${channelId ? 'resolved-in-handlePlay' : 'member-voice'}`
+      );
+      if (!targetChannelId) {
+        message.reply('No voice channel available for playlist playback.');
+        return;
+      }
+      queue = await createQueueAndConnection(message, targetChannelId);
     }
     
     // Process each video in the playlist
@@ -317,55 +390,58 @@ async function handlePlaylist(message: Message, url: string, existingQueue?: Mus
     // Add YouTube URLs to queue (we'll get fresh audio URLs when playing)
     for (const entry of entries) {
       try {
-        // Just get the title, store the YouTube URL for later
-        const videoFlags: Flags = {
-          dumpSingleJson: true,
-          simulate: true,
+        const { title } = await fetchVideoInfoWithLogging(
+          entry.url,
+          `playlist-entry guild=${guildId}`
+        );
+        const queueItem = {
+          title,
+          url: entry.url, // Store YouTube URL, not direct audio URL
+          requestedBy: message.author.username
         };
-        
-        const videoInfo = await youtubeDl(entry.url, videoFlags) as unknown as ExtendedPayload;
-        
-        if (videoInfo.title) {
-          const queueItem = {
-            title: videoInfo.title,
-            url: entry.url, // Store YouTube URL, not direct audio URL
-            requestedBy: message.author.username
-          };
-          
-          queue.addSong(queueItem);
-          addedCount++;
-          
-          // Start playing the first song if it's the current song
-          if (queue.getCurrentSong()?.url === queueItem.url) {
-            playYouTubeUrl(queueItem.url, queue.getPlayer(), message, queueItem.title, isFirstSong && addedCount === 1);
-          }
+
+        const hadCurrentSongBeforeAdd = !!queue.getCurrentSong();
+        queue.addSong(queueItem);
+        addedCount++;
+
+        // Start playing the first song if it's the current song
+        if (!hadCurrentSongBeforeAdd && queue.getCurrentSong()?.url === queueItem.url) {
+          playYouTubeUrl(queueItem.url, queue.getPlayer(), message, queueItem.title, isFirstSong && addedCount === 1);
         }
       } catch (error) {
-        console.error(`Error processing playlist video ${entry.url}:`, error);
+        console.error(`[yt-fetch] playlist entry failed url=${entry.url} error=${formatYtDlpError(error)}`);
         // Continue with next video even if one fails
       }
     }
+
+    requestNextSongPrefetch(message);
     
     message.reply(`Successfully added ${addedCount} out of ${totalVideos} videos from the playlist to the queue.`);
     
   } catch (error) {
-    console.error('Playlist processing error:', error);
+    console.error(`[yt-fetch] playlist processing error url=${url} error=${formatYtDlpError(error)}`);
     message.reply('Error processing the playlist!');
   }
 }
 
-async function createQueueAndConnection(message: Message): Promise<MusicQueue> {
-  console.log('Creating new voice connection and queue');
+async function createQueueAndConnection(message: Message, channelId: string): Promise<MusicQueue> {
+  console.log(
+    `[voice] Creating new voice connection guild=${message.guild?.name} (${message.guild?.id}) `
+    + `channel=${voiceChannelLabel(message, channelId)}`
+  );
   const guildId = message.guild!.id;
   
   const connection = joinVoiceChannel({
-    channelId: message.member!.voice.channel!.id,
+    channelId,
     guildId: guildId,
     adapterCreator: message.guild!.voiceAdapterCreator as DiscordGatewayAdapterCreator,
   });
 
   connection.on('stateChange', (oldState, newState) => {
-    console.log(`Connection state changed from ${oldState.status} to ${newState.status}`);
+    console.log(
+      `[voice] Connection state guild=${message.guild?.name} channel=${voiceChannelLabel(message, channelId)} `
+      + `${oldState.status} -> ${newState.status}`
+    );
   });
 
   connection.on(VoiceConnectionStatus.Disconnected, async () => {
@@ -384,15 +460,19 @@ async function createQueueAndConnection(message: Message): Promise<MusicQueue> {
       const guildId = message.guild!.id;
       if (queues.has(guildId)) {
         queues.delete(guildId);
-        hasRepliedToPlay.delete(guildId);
-        lastBotMessages.delete(guildId);
+        clearGuildUiTracking(guildId);
+        clearStartupTrace(guildId);
+        clearNextSongPrefetch(guildId);
         console.log(`Cleaned up queue and tracking for guild: ${guildId}`);
       }
     }
   });
 
   connection.on('error', error => {
-    console.error('Voice Connection Error:', error);
+    console.error(
+      `[voice] Connection error guild=${message.guild?.name} channel=${voiceChannelLabel(message, channelId)}:`,
+      error
+    );
   });
 
   const player = createAudioPlayer();
@@ -403,6 +483,39 @@ async function createQueueAndConnection(message: Message): Promise<MusicQueue> {
 
   player.on('stateChange', (oldState, newState) => {
     console.log(`Audio player state changed from ${oldState.status} to ${newState.status}`);
+
+    const trace = getStartupTrace(guildId);
+    if (!trace) return;
+
+    if (newState.status === AudioPlayerStatus.Buffering && !trace.bufferingAt) {
+      trace.bufferingAt = Date.now();
+      logStartupTrace(trace, 'state=buffering');
+    }
+
+    if (newState.status === AudioPlayerStatus.Playing && !trace.playingAt) {
+      trace.playingAt = Date.now();
+      const fromPlayCall = trace.playerPlayAt ? `${trace.playingAt - trace.playerPlayAt}ms from player.play()` : 'n/a';
+      logStartupTrace(trace, 'state=playing', `startupLatency=${trace.playingAt - trace.startedAt}ms, playCallDelta=${fromPlayCall}`);
+    }
+
+    if (oldState.status === AudioPlayerStatus.Playing && newState.status === AudioPlayerStatus.Buffering) {
+      if (!trace.firstRebufferAt) {
+        trace.firstRebufferAt = Date.now();
+      }
+      logStartupTrace(
+        trace,
+        'rebuffer',
+        `afterPlaying=${trace.playingAt ? trace.firstRebufferAt - trace.playingAt : 'n/a'}ms`
+      );
+    }
+
+    if (newState.status === AudioPlayerStatus.Idle) {
+      logStartupTrace(
+        trace,
+        'state=idle',
+        trace.playingAt ? `playedFor=${Date.now() - trace.playingAt}ms` : 'before-playing'
+      );
+    }
   });
 
   const queue = new MusicQueue(player);
@@ -410,11 +523,27 @@ async function createQueueAndConnection(message: Message): Promise<MusicQueue> {
   
   connection.subscribe(player);
 
+  try {
+    await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
+    console.log(
+      `[voice] Connection ready guild=${message.guild?.name} channel=${voiceChannelLabel(message, channelId)}`
+    );
+  } catch (error) {
+    console.error(
+      `[voice] Connection did not become ready guild=${message.guild?.name} channel=${voiceChannelLabel(message, channelId)}`,
+      error
+    );
+    connection.destroy();
+    throw error;
+  }
+
   player.on(AudioPlayerStatus.Idle, () => {
     const nextSong = queue.getNextSong();
     if (nextSong) {
       playYouTubeUrl(nextSong.url, queue.getPlayer(), message, nextSong.title);
     } else {
+      clearStartupTrace(guildId);
+      clearNextSongPrefetch(guildId);
       // Wait before disconnecting so users can queue more songs
       setTimeout(() => {
         // Re-check: if a song was added during the delay, don't leave
@@ -427,477 +556,3 @@ async function createQueueAndConnection(message: Message): Promise<MusicQueue> {
   
   return queue;
 }
-
-function createFfmpegStream(url: string): Readable {
-  const ffmpeg = spawn('ffmpeg', [
-    '-reconnect', '1',
-    '-reconnect_streamed', '1',
-    '-reconnect_delay_max', '5',
-    '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    '-headers', 'Accept: */*',
-    '-headers', 'Accept-Language: en-US,en;q=0.9',
-    '-headers', 'Accept-Encoding: identity',
-    '-headers', 'Range: bytes=0-',
-    '-headers', 'Connection: keep-alive',
-    '-headers', 'Sec-Fetch-Dest: video',
-    '-headers', 'Sec-Fetch-Mode: no-cors',
-    '-headers', 'Sec-Fetch-Site: cross-site',
-    '-i', url,
-    '-analyzeduration', '0',
-    '-probesize', '32768',        // Minimize probe size to reduce memory usage
-    '-loglevel', 'info',
-    '-f', 's16le',
-    '-ar', '48000',
-    '-ac', '2',
-    '-acodec', 'pcm_s16le',
-    '-bufsize', '64k',         // Small buffer size to reduce memory usage
-    'pipe:1'
-  ]);
-
-  // Handle process errors
-  ffmpeg.on('error', error => {
-    console.error('FFmpeg process error:', error);
-  });
-
-  // Handle process exit
-  ffmpeg.on('exit', (code, signal) => {
-    if (code !== 0) {
-      console.log(`FFmpeg process exited with code ${code} and signal ${signal}`);
-    } else {
-      console.log('FFmpeg process completed successfully');
-    }
-  });
-
-  // Handle stderr to see what FFmpeg is complaining about
-  ffmpeg.stderr.on('data', (data) => {
-    const errorMessage = data.toString();
-    console.error('FFmpeg stderr:', errorMessage);
-    
-    // Check for specific error patterns
-    if (errorMessage.includes('403') || errorMessage.includes('Forbidden')) {
-      console.error('FFmpeg: Access forbidden - URL may have expired');
-    }
-    if (errorMessage.includes('404') || errorMessage.includes('Not Found')) {
-      console.error('FFmpeg: URL not found - URL may have expired');
-    }
-  });
-
-  // Handle stdout errors
-  const stdout = ffmpeg.stdout;
-  stdout.on('error', error => {
-    console.error('FFmpeg stdout error:', error);
-  });
-
-  return stdout;
-}
-
-function createYouTubeStream(youtubeUrl: string): Readable {
-  // Pipe yt-dlp audio output directly into FFmpeg to avoid URL expiry/403 issues
-  console.log('Piping yt-dlp -> ffmpeg for:', youtubeUrl);
-
-  const ytdlpBin = path.join(__dirname, '../../node_modules/youtube-dl-exec/bin/yt-dlp');
-
-  const ytdlp = spawn(ytdlpBin, [
-    '-f', 'bestaudio',
-    '-o', '-',
-    '--no-warnings',
-    youtubeUrl
-  ]);
-
-  const ffmpeg = spawn('ffmpeg', [
-    '-i', 'pipe:0',
-    '-analyzeduration', '0',
-    '-probesize', '32768',
-    '-loglevel', 'warning',
-    '-f', 's16le',
-    '-ar', '48000',
-    '-ac', '2',
-    '-acodec', 'pcm_s16le',
-    '-bufsize', '64k',
-    'pipe:1'
-  ]);
-
-  ytdlp.stdout.pipe(ffmpeg.stdin, { end: true });
-
-  ffmpeg.stdin.on('error', (error) => {
-    console.error('FFmpeg stdin error (ignored):', error.message);
-  });
-
-  let ytdlpExited = false;
-  let ffmpegExited = false;
-
-  ytdlp.stderr.on('data', (data) => {
-    console.error('yt-dlp stderr:', data.toString().trim());
-  });
-
-  ytdlp.on('error', error => {
-    console.error('yt-dlp process error:', error);
-  });
-
-  ytdlp.on('exit', (code) => {
-    ytdlpExited = true;
-    if (code !== 0) console.log(`yt-dlp exited with code ${code}`);
-  });
-
-  ffmpeg.on('error', error => {
-    console.error('FFmpeg process error:', error);
-  });
-
-  ffmpeg.on('exit', (code) => {
-    ffmpegExited = true;
-    if (code !== 0) console.log(`FFmpeg exited with code ${code}`);
-    else console.log('FFmpeg completed successfully');
-  });
-
-  ffmpeg.stderr.on('data', (data) => {
-    const msg = data.toString();
-    if (msg.includes('403') || msg.includes('Forbidden')) {
-      console.error('FFmpeg: Access forbidden');
-    }
-  });
-
-  ffmpeg.stdout.on('error', error => {
-    console.error('FFmpeg stdout error:', error);
-  });
-
-  // Clean up: if one process dies, stop the other safely
-  ytdlp.on('exit', () => {
-    if (!ffmpegExited && !ffmpeg.stdin.destroyed && !ffmpeg.stdin.writableEnded) {
-      ffmpeg.stdin.end();
-    }
-  });
-  ffmpeg.on('exit', () => {
-    if (!ytdlpExited && ytdlp.exitCode === null) {
-      ytdlp.kill();
-    }
-  });
-
-  // Pipe through a PassThrough stream so that buffered PCM data survives
-  // after FFmpeg exits (Node.js destroys child process stdio on exit)
-  const passthrough = new PassThrough();
-  ffmpeg.stdout.pipe(passthrough);
-
-  return passthrough;
-}
-
-async function playYouTubeUrlDirect(youtubeUrl: string, player: AudioPlayer, message: Message, title: string, isFirstSong: boolean = false) {
-  try {
-    console.log('Streaming directly from YouTube URL with FFmpeg:', youtubeUrl);
-
-    const stream = createYouTubeStream(youtubeUrl);
-
-    // Add error handling for the stream
-    stream.on('error', (error: Error) => {
-      console.error('YouTube stream error:', error);
-    });
-
-    const resource = createAudioResource(stream, {
-      inputType: StreamType.Raw,
-      inlineVolume: true
-    });
-
-    resource.volume?.setVolume(0.5);
-    player.play(resource);
-
-    await sendOrEditMusicMessage(message, `Now playing: ${title}`, isFirstSong);
-  } catch (error) {
-    console.error('Error in playYouTubeUrlDirect:', error);
-    (message.channel as any).send(`Failed to play: ${title}, skipping...`);
-    player.stop();
-  }
-}
-
-async function playYouTubeUrl(youtubeUrl: string, player: AudioPlayer, message: Message, title: string, isFirstSong: boolean = false) {
-  try {
-    console.log('Attempting to stream directly from YouTube URL:', youtubeUrl);
-    
-    // Try streaming directly from YouTube URL using youtube-dl in FFmpeg
-    await playYouTubeUrlDirect(youtubeUrl, player, message, title, isFirstSong);
-    
-  } catch (error) {
-    console.error('Error streaming YouTube URL:', error);
-    message.reply('Error streaming from YouTube');
-  }
-}
-
-async function playSong(url: string, player: AudioPlayer, message: Message, title: string, isFirstSong: boolean = false) {
-  try {
-    console.log('Creating FFmpeg stream for URL:', url);
-    console.log('URL length:', url.length);
-    console.log('URL starts with:', url.substring(0, 100));
-    console.log('FFmpeg starting at timestamp:', Date.now());
-    
-    const stream = createFfmpegStream(url);
-    
-    // Add error handling for the stream
-    stream.on('error', (error) => {
-      console.error('Stream error:', error);
-      message.reply('Error with audio stream');
-    });
-    
-    const resource = createAudioResource(stream, {
-      inputType: StreamType.Raw,
-      inlineVolume: true
-    });
-
-    resource.volume?.setVolume(0.5); // Set volume to 50% to avoid distortion
-    player.play(resource);
-    
-    await sendOrEditMusicMessage(message, `Now playing: ${title}`, isFirstSong);
-  } catch (error) {
-    console.error('Error in playSong:', error);
-    message.reply('Error playing the audio');
-  }
-}
-
-export function handlePause(message: Message) {
-  const queue = queues.get(message.guild!.id);
-  if (!queue) {
-    message.reply('No music is playing!');
-    return;
-  }
-
-  if (queue.pause()) {
-    message.reply('Paused the music!');
-  } else {
-    message.reply('The music is already paused!');
-  }
-}
-
-export function handleResume(message: Message) {
-  const queue = queues.get(message.guild!.id);
-  if (!queue) {
-    message.reply('No music is queued!');
-    return;
-  }
-
-  if (queue.resume()) {
-    message.reply('Resumed the music!');
-  } else {
-    message.reply('The music is already playing!');
-  }
-}
-
-export function handleSkip(message: Message) {
-  const queue = queues.get(message.guild!.id);
-  if (!queue) {
-    message.reply('No music is playing!');
-    return;
-  }
-
-  queue.skip();
-  message.reply('Skipped the current song!');
-}
-
-export function handleQueue(message: Message) {
-  const queue = queues.get(message.guild!.id);
-  if (!queue) {
-    message.reply('No music is queued!');
-    return;
-  }
-
-  const currentSong = queue.getCurrentSong();
-  const queueList = queue.getQueue();
-
-  let response = 'Music Queue:\n';
-  if (currentSong) {
-    response += `Now Playing: ${currentSong.title} (requested by ${currentSong.requestedBy})\n\n`;
-  }
-
-  if (queueList.length === 0) {
-    response += 'No songs in queue.';
-  } else {
-    response += queueList
-      .map((song, index) => `${index + 1}. ${song.title} (requested by ${song.requestedBy})`)
-      .join('\n');
-  }
-
-  message.reply(response);
-}
-
-export function handleHelp(message: Message) {
-  const embed = new EmbedBuilder()
-    .setColor(0x0099ff)
-    .setTitle('🎵 Music Bot Commands')
-    .setDescription('Here are all the available commands:')
-    .addFields(
-      { name: '!play <url>', value: 'Play a YouTube video or playlist', inline: false },
-      { name: '!pause', value: 'Pause the current song', inline: true },
-      { name: '!resume', value: 'Resume the paused song', inline: true },
-      { name: '!skip', value: 'Skip the current song', inline: true },
-      { name: '!queue', value: 'Show the current music queue', inline: false },
-      { name: '!nukkumaan', value: 'Reset the bot and disconnect from all voice channels (Admin only)', inline: false },
-      { name: '!cleanup', value: 'Force cleanup and disconnect from voice channels (Admin only)', inline: false },
-      { name: '!help', value: 'Show this help message', inline: false }
-    )
-    .setFooter({ text: 'You can also use the buttons on music messages for quick controls!' })
-    .setTimestamp();
-
-  message.reply({ embeds: [embed] });
-}
-
-export function handleCleanup(message: Message) {
-  if (!message.member?.permissions.has('Administrator')) {
-    message.reply('You need administrator permissions to use this command!');
-    return;
-  }
-
-  try {
-    message.reply('Running cleanup...');
-    checkAndLeaveIfNeeded(message.client);
-    message.reply('Cleanup completed! Check console for details.');
-  } catch (error) {
-    console.error('Cleanup command error:', error);
-    message.reply('Error during cleanup!');
-  }
-}
-
-
-export function handleNukkumaan(message: Message) {
-  if (!message.member?.permissions.has('Administrator')) {
-    message.reply('You need administrator permissions to use this command!');
-    return;
-  }
-
-  try {
-    // Check all guilds where the bot is in voice channels
-    message.client.guilds.cache.forEach(guild => {
-      const queue = queues.get(guild.id);
-      if (queue) {
-        // Stop the player and clear the queue
-        const player = queue.getPlayer();
-        player.stop();
-        queues.delete(guild.id);
-      }
-
-      // Check if bot is in a voice channel
-      const me = guild.members.cache.get(message.client.user!.id);
-      if (me?.voice.channel) {
-        // Force disconnect from voice channel
-        const connection = getVoiceConnection(guild.id);
-        if (connection) {
-          connection.destroy();
-          console.log(`Destroyed connection in guild: ${guild.name}`);
-        }
-        me.voice.disconnect();
-        console.log(`Left voice channel in guild: ${guild.name}`);
-      }
-      
-      // Reset tracking for this guild
-      hasRepliedToPlay.delete(guild.id);
-      lastBotMessages.delete(guild.id);
-    });
-
-    message.reply('Bot has been reset and disconnected from all voice channels!');
-  } catch (error) {
-    console.error('Reset command error:', error);
-    message.reply('Error during reset!');
-  }
-}
-
-function checkAndLeaveChannel(guildId: string, client: Client) {
-  const guild = client.guilds.cache.get(guildId);
-  if (!guild) {
-    console.log(`Guild ${guildId} not found, cleaning up...`);
-    // Clean up even if guild not found
-    if (queues.has(guildId)) {
-      queues.delete(guildId);
-      hasRepliedToPlay.delete(guildId);
-      lastBotMessages.delete(guildId);
-    }
-    return;
-  }
-
-  const botMember = guild.members.cache.get(client.user!.id);
-  const channel = botMember?.voice.channel;
-  
-  if (!channel) {
-    console.log(`Bot not in voice channel in ${guild.name}, cleaning up...`);
-    // Clean up if not in voice channel
-    if (queues.has(guildId)) {
-      queues.delete(guildId);
-      hasRepliedToPlay.delete(guildId);
-      lastBotMessages.delete(guildId);
-    }
-    return;
-  }
-
-  const humanMembers = channel.members.filter(member => !member.user.bot).size;
-  const queue = queues.get(guildId);
-  const isPlaying = queue && queue.getCurrentSong() && !queue.isIdle();
-
-  console.log(`Checking ${guild.name}: ${humanMembers} humans, playing: ${isPlaying}, queue size: ${queue ? queue.getQueue().length : 0}`);
-
-  // Leave if bot is alone OR if no music is playing and queue is empty
-  if (humanMembers === 0 || (!isPlaying && (!queue || (!queue.getCurrentSong() && !queue.hasNextSong())))) {
-    console.log(`Leaving voice channel in ${guild.name}: ${humanMembers === 0 ? 'alone' : 'no music playing'}`);
-    
-    const connection = getVoiceConnection(guildId);
-    if (connection) {
-      try {
-        connection.destroy();
-        console.log(`Destroyed voice connection for ${guild.name}`);
-      } catch (error) {
-        console.error(`Error destroying connection for ${guild.name}:`, error);
-      }
-    }
-    
-    if (queue) {
-      try {
-        const player = queue.getPlayer();
-        player.stop();
-        console.log(`Stopped audio player for ${guild.name}`);
-      } catch (error) {
-        console.error(`Error stopping player for ${guild.name}:`, error);
-      }
-      queues.delete(guildId);
-    }
-    
-    // Reset tracking for this guild
-    hasRepliedToPlay.delete(guildId);
-    lastBotMessages.delete(guildId);
-    console.log(`Cleaned up all tracking for ${guild.name}`);
-  }
-}
-
-export function checkAndLeaveIfNeeded(client: Client, specificGuildId?: string) {
-  console.log(`Running checkAndLeaveIfNeeded for ${specificGuildId || 'all guilds'}`);
-  
-  // Clean up log files first
-  cleanupLogFiles();
-  
-  if (specificGuildId) {
-    const guild = client.guilds.cache.get(specificGuildId);
-    if (guild) {
-      const botMember = guild.members.cache.get(client.user!.id);
-      if (botMember?.voice.channel) {
-        checkAndLeaveChannel(guild.id, client);
-      } else {
-        // Bot not in voice channel, clean up anyway
-        checkAndLeaveChannel(guild.id, client);
-      }
-    } else {
-      // Guild not found, clean up anyway
-      checkAndLeaveChannel(specificGuildId, client);
-    }
-  } else {
-    // Check all guilds
-    let checkedGuilds = 0;
-    let cleanedGuilds = 0;
-    
-    client.guilds.cache.forEach(guild => {
-      checkedGuilds++;
-      const botMember = guild.members.cache.get(client.user!.id);
-      if (botMember?.voice.channel) {
-        checkAndLeaveChannel(guild.id, client);
-        cleanedGuilds++;
-      } else {
-        // Bot not in voice channel, clean up anyway
-        checkAndLeaveChannel(guild.id, client);
-      }
-    });
-    
-    console.log(`Checked ${checkedGuilds} guilds, cleaned up ${cleanedGuilds} voice connections`);
-  }
-}
-

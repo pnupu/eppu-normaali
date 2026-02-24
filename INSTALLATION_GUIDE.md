@@ -101,13 +101,13 @@ MAX_VOICE_DURATION=10000
 ### 3. Install Dependencies
 
 ```bash
-npm install
+bun install
 ```
 
 ### 4. Build the Project
 
 ```bash
-npm run build
+bun run build
 ```
 
 ## Step 4: Audio Device Configuration
@@ -141,7 +141,7 @@ AUDIO_DEVICE=plughw:0,0
 ### 1. Start the Bot
 
 ```bash
-npm start
+bun run dev
 ```
 
 ### 2. Test Voice Commands
@@ -234,15 +234,18 @@ VOICE_DEBUG=true
 | "Eppu, etsi [kappale]" | Search songs |
 | "Eppu, apua" | Show help |
 
-### Text Commands
+### Discord Slash Commands
 
-All existing text commands still work:
-- `!play [URL]` - Play YouTube video/playlist
-- `!pause` - Pause music
-- `!resume` - Resume music
-- `!skip` - Skip song
-- `!queue` - Show queue
-- `!help` - Show help
+Use slash commands in your server:
+- `/play url:<youtube_url>` - Play YouTube video/playlist
+- `/pause` - Pause music
+- `/resume` - Resume music
+- `/skip` - Skip song
+- `/queue` - Show queue
+- `/help` - Show help
+- `/web-login` - Get a one-time web login link via DM
+- `/cleanup` - Force cleanup/disconnect (Admin)
+- `/nukkumaan` - Reset bot and leave all voice channels (Admin)
 
 ## Step 8: Maintenance
 
@@ -250,10 +253,10 @@ All existing text commands still work:
 
 ```bash
 # Update dependencies
-npm update
+bun update
 
 # Rebuild project
-npm run build
+bun run build
 ```
 
 ### Log Monitoring
