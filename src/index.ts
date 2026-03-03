@@ -1,4 +1,4 @@
-import { ChatInputCommandInteraction, Client, Events, GatewayIntentBits, Guild, Message, MessageFlags, PermissionFlagsBits, SlashCommandBuilder } from 'discord.js';
+import { ChatInputCommandInteraction, Client, DiscordAPIError, Events, GatewayIntentBits, Guild, Message, MessageFlags, PermissionFlagsBits, SlashCommandBuilder } from 'discord.js';
 import { config } from 'dotenv';
 import { handlePlay, handlePause, handleResume, handleSkip, handleQueue, handleNukkumaan, handleHelp, handleCleanup, checkAndLeaveIfNeeded } from './commands/play';
 import { startWebServer } from './web/server';
@@ -80,6 +80,40 @@ function envBool(value: string | undefined): boolean {
   return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
 }
 
+function isUnknownInteractionError(error: unknown): boolean {
+  return error instanceof DiscordAPIError && error.code === 10062;
+}
+
+async function safeDeferReply(interaction: ChatInputCommandInteraction, ephemeral = false): Promise<boolean> {
+  try {
+    if (ephemeral) {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    } else {
+      await interaction.deferReply();
+    }
+    return true;
+  } catch (error) {
+    if (isUnknownInteractionError(error)) {
+      console.warn(`Ignored expired interaction during deferReply (id=${interaction.id})`);
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function safeEditReply(interaction: ChatInputCommandInteraction, content: string): Promise<boolean> {
+  try {
+    await interaction.editReply(content);
+    return true;
+  } catch (error) {
+    if (isUnknownInteractionError(error)) {
+      console.warn(`Ignored expired interaction during editReply (id=${interaction.id})`);
+      return false;
+    }
+    throw error;
+  }
+}
+
 function getWebBaseUrl(): string | null {
   const baseUrl = process.env.WEB_BASE_URL?.trim();
   if (!baseUrl) return null;
@@ -144,10 +178,18 @@ async function registerGuildCommands(client: Client) {
 
 async function interactionReply(interaction: ChatInputCommandInteraction, payload: any) {
   const content = typeof payload === 'string' ? { content: payload } : payload;
-  if (interaction.deferred || interaction.replied) {
-    return interaction.followUp(content);
+  try {
+    if (interaction.deferred || interaction.replied) {
+      return await interaction.followUp(content);
+    }
+    return await interaction.reply(content);
+  } catch (error) {
+    if (isUnknownInteractionError(error)) {
+      console.warn(`Ignored expired interaction during reply/followUp (id=${interaction.id})`);
+      return null;
+    }
+    throw error;
   }
-  return interaction.reply(content);
 }
 
 async function interactionToMessage(interaction: ChatInputCommandInteraction): Promise<Message> {
@@ -185,20 +227,22 @@ async function interactionToMessage(interaction: ChatInputCommandInteraction): P
 }
 
 async function handleWebLoginCommand(interaction: ChatInputCommandInteraction) {
+  try {
+    const deferred = await safeDeferReply(interaction, true);
+    if (!deferred) return;
+  } catch (error) {
+    console.warn('Failed to defer /web-login reply', error);
+    return;
+  }
+
   const baseUrl = getWebBaseUrl();
   if (!baseUrl) {
-    await interaction.reply({
-      content: 'WEB_BASE_URL puuttuu tai on virheellinen botin ympäristöasetuksissa.',
-      flags: MessageFlags.Ephemeral,
-    });
+    await safeEditReply(interaction, 'WEB_BASE_URL puuttuu tai on virheellinen botin ympäristöasetuksissa.');
     return;
   }
 
   if (!interaction.guildId) {
-    await interaction.reply({
-      content: 'Suorita tämä komento Discord-palvelimellasi.',
-      flags: MessageFlags.Ephemeral,
-    });
+    await safeEditReply(interaction, 'Suorita tämä komento Discord-palvelimellasi.');
     return;
   }
 
@@ -215,16 +259,10 @@ async function handleWebLoginCommand(interaction: ChatInputCommandInteraction) {
     await interaction.user.send(
       `Epun kertakäyttöinen verkkokirjautumislinkki:\n${loginUrl}\n\nLinkki toimii kerran ja vanhenee <t:${expiresAtUnix}:R>`
     );
-    await interaction.reply({
-      content: 'Lähetin sinulle yksityisviestillä kertakäyttöisen kirjautumislinkin.',
-      flags: MessageFlags.Ephemeral,
-    });
+    await safeEditReply(interaction, 'Lähetin sinulle yksityisviestillä kertakäyttöisen kirjautumislinkin.');
   } catch (error) {
     console.error('Failed to DM web login link:', error);
-    await interaction.reply({
-      content: 'Yksityisviestin lähetys epäonnistui. Tarkista yksityisyysasetukset ja yritä uudelleen.',
-      flags: MessageFlags.Ephemeral,
-    });
+    await safeEditReply(interaction, 'Yksityisviestin lähetys epäonnistui. Tarkista yksityisyysasetukset ja yritä uudelleen.');
   }
 }
 
@@ -243,65 +281,106 @@ client.once(Events.ClientReady, async () => {
   }, 15 * 60 * 1000); // 15 minutes
 });
 
+client.on(Events.ShardDisconnect, (event, shardId) => {
+  console.warn(
+    `[gateway] shardDisconnect id=${shardId} code=${event.code} wasClean=${event.wasClean} `
+    + `reason=${event.reason || 'n/a'}`
+  );
+});
+
+client.on(Events.ShardReconnecting, (shardId) => {
+  console.warn(`[gateway] shardReconnecting id=${shardId}`);
+});
+
+client.on(Events.ShardResume, (replayedEvents, shardId) => {
+  console.log(`[gateway] shardResume id=${shardId} replayedEvents=${replayedEvents}`);
+});
+
+client.on(Events.ShardReady, (shardId) => {
+  console.log(`[gateway] shardReady id=${shardId}`);
+});
+
 // Handle button interactions
 client.on('interactionCreate', async (interaction) => {
-  if (interaction.isChatInputCommand()) {
-    switch (interaction.commandName) {
-      case WEB_LOGIN_COMMAND:
-        await handleWebLoginCommand(interaction);
-        return;
-      case PLAY_COMMAND: {
-        const url = interaction.options.getString('url', true);
-        await interaction.deferReply();
-        await handlePlay(await interactionToMessage(interaction), url);
-        return;
+  try {
+    if (interaction.isChatInputCommand()) {
+      switch (interaction.commandName) {
+        case WEB_LOGIN_COMMAND:
+          await handleWebLoginCommand(interaction);
+          return;
+        case PLAY_COMMAND: {
+          const url = interaction.options.getString('url', true);
+          await interaction.deferReply();
+          await handlePlay(await interactionToMessage(interaction), url);
+          return;
+        }
+        case PAUSE_COMMAND:
+          await interaction.deferReply();
+          handlePause(await interactionToMessage(interaction));
+          return;
+        case RESUME_COMMAND:
+          await interaction.deferReply();
+          handleResume(await interactionToMessage(interaction));
+          return;
+        case SKIP_COMMAND:
+          await interaction.deferReply();
+          handleSkip(await interactionToMessage(interaction));
+          return;
+        case QUEUE_COMMAND:
+          await interaction.deferReply();
+          handleQueue(await interactionToMessage(interaction));
+          return;
+        case HELP_COMMAND:
+          await interaction.deferReply();
+          handleHelp(await interactionToMessage(interaction));
+          return;
+        case CLEANUP_COMMAND:
+          await interaction.deferReply();
+          handleCleanup(await interactionToMessage(interaction));
+          return;
+        case NUKKUMAAN_COMMAND:
+          await interaction.deferReply();
+          handleNukkumaan(await interactionToMessage(interaction));
+          return;
       }
-      case PAUSE_COMMAND:
-        await interaction.deferReply();
-        handlePause(await interactionToMessage(interaction));
-        return;
-      case RESUME_COMMAND:
-        await interaction.deferReply();
-        handleResume(await interactionToMessage(interaction));
-        return;
-      case SKIP_COMMAND:
-        await interaction.deferReply();
-        handleSkip(await interactionToMessage(interaction));
-        return;
-      case QUEUE_COMMAND:
-        await interaction.deferReply();
-        handleQueue(await interactionToMessage(interaction));
-        return;
-      case HELP_COMMAND:
-        await interaction.deferReply();
-        handleHelp(await interactionToMessage(interaction));
-        return;
-      case CLEANUP_COMMAND:
-        await interaction.deferReply();
-        handleCleanup(await interactionToMessage(interaction));
-        return;
-      case NUKKUMAAN_COMMAND:
-        await interaction.deferReply();
-        handleNukkumaan(await interactionToMessage(interaction));
-        return;
     }
-  }
 
-  if (!interaction.isButton()) return;
+    if (!interaction.isButton()) return;
 
-  switch (interaction.customId) {
-    case 'pause':
-      await interaction.deferUpdate();
-      handlePause(interaction.message as any);
-      break;
-    case 'resume':
-      await interaction.deferUpdate();
-      handleResume(interaction.message as any);
-      break;
-    case 'skip':
-      await interaction.deferUpdate();
-      handleSkip(interaction.message as any);
-      break;
+    switch (interaction.customId) {
+      case 'pause':
+        await interaction.deferUpdate();
+        handlePause(interaction.message as any);
+        break;
+      case 'resume':
+        await interaction.deferUpdate();
+        handleResume(interaction.message as any);
+        break;
+      case 'skip':
+        await interaction.deferUpdate();
+        handleSkip(interaction.message as any);
+        break;
+    }
+  } catch (error) {
+    console.error('interactionCreate handler failed:', error);
+
+    if (!interaction.isRepliable()) return;
+
+    try {
+      if (interaction.deferred || interaction.replied) {
+        await interaction.followUp({
+          content: 'Komennon käsittely epäonnistui.',
+          flags: MessageFlags.Ephemeral,
+        });
+      } else {
+        await interaction.reply({
+          content: 'Komennon käsittely epäonnistui.',
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+    } catch {
+      // Ignore follow-up failures (for example, expired interactions).
+    }
   }
 });
 

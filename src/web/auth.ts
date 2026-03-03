@@ -6,6 +6,7 @@ interface Session {
   email: string;
   name: string;
   isAdmin: boolean;
+  guildId: string | null;
 }
 
 interface DbSessionRow {
@@ -13,6 +14,7 @@ interface DbSessionRow {
   name: string;
   isAdmin: number;
   expiresAt: number;
+  guildId: string | null;
 }
 
 interface DbDiscordLoginRow {
@@ -23,17 +25,24 @@ interface DbDiscordLoginRow {
   expiresAt: number;
 }
 
-const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const SESSION_TTL_MS = Math.max(
+  60_000,
+  parseInt(process.env.WEB_SESSION_TTL_MS || '86400000', 10) || 86_400_000
+); // 24h default
 const AUTH_DB_PATH = process.env.WEB_AUTH_DB_PATH?.trim() || path.join(__dirname, '../../web-auth.db');
 
 const db = new sqlite3.Database(AUTH_DB_PATH);
 let lastPruneAt = 0;
 
-function run(sql: string, params: unknown[] = []): Promise<void> {
+interface RunResult {
+  changes: number;
+}
+
+function run(sql: string, params: unknown[] = []): Promise<RunResult> {
   return new Promise((resolve, reject) => {
-    db.run(sql, params, (err) => {
+    db.run(sql, params, function onRun(err) {
       if (err) reject(err);
-      else resolve();
+      else resolve({ changes: this.changes ?? 0 });
     });
   });
 }
@@ -50,6 +59,18 @@ function get<T>(sql: string, params: unknown[] = []): Promise<T | undefined> {
   });
 }
 
+function all<T>(sql: string, params: unknown[] = []): Promise<T[]> {
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve((rows || []) as T[]);
+    });
+  });
+}
+
 const schemaReady = (async () => {
   await run(`
     CREATE TABLE IF NOT EXISTS sessions (
@@ -57,6 +78,7 @@ const schemaReady = (async () => {
       email TEXT NOT NULL,
       name TEXT NOT NULL,
       is_admin INTEGER NOT NULL DEFAULT 0,
+      guild_id TEXT,
       expires_at INTEGER NOT NULL,
       created_at INTEGER NOT NULL
     )
@@ -76,6 +98,13 @@ const schemaReady = (async () => {
 
   await run(`CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_login_links_expires ON discord_login_links(expires_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_sessions_guild ON sessions(guild_id)`);
+
+  // Migration for older DBs created before guild_id existed.
+  const columns = await all<{ name: string }>(`PRAGMA table_info(sessions)`);
+  if (!columns.some((column) => column.name === 'guild_id')) {
+    await run(`ALTER TABLE sessions ADD COLUMN guild_id TEXT`);
+  }
 })();
 
 async function pruneExpiredIfNeeded(): Promise<void> {
@@ -93,14 +122,14 @@ function parseSessionToken(cookieHeader: string | undefined): string | null {
   return match?.[1] || null;
 }
 
-async function createSession(email: string, name: string, isAdmin: boolean): Promise<string> {
+async function createSession(email: string, name: string, isAdmin: boolean, guildId: string | null): Promise<string> {
   const token = crypto.randomBytes(32).toString('hex');
   const now = Date.now();
   const expiresAt = now + SESSION_TTL_MS;
 
   await run(
-    `INSERT INTO sessions(token, email, name, is_admin, expires_at, created_at) VALUES(?, ?, ?, ?, ?, ?)`,
-    [token, email, name, isAdmin ? 1 : 0, expiresAt, now]
+    `INSERT INTO sessions(token, email, name, is_admin, guild_id, expires_at, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)`,
+    [token, email, name, isAdmin ? 1 : 0, guildId, expiresAt, now]
   );
 
   return token;
@@ -114,7 +143,7 @@ export async function getSessionFromCookie(cookieHeader: string | undefined): Pr
   if (!token) return null;
 
   const row = await get<DbSessionRow>(
-    `SELECT email, name, is_admin as isAdmin, expires_at as expiresAt FROM sessions WHERE token = ?`,
+    `SELECT email, name, is_admin as isAdmin, guild_id as guildId, expires_at as expiresAt FROM sessions WHERE token = ?`,
     [token]
   );
 
@@ -128,7 +157,16 @@ export async function getSessionFromCookie(cookieHeader: string | undefined): Pr
     email: row.email,
     name: row.name,
     isAdmin: row.isAdmin === 1,
+    guildId: row.guildId || null,
   };
+}
+
+export async function logoutSessionFromCookie(cookieHeader: string | undefined): Promise<boolean> {
+  await schemaReady;
+  const token = parseSessionToken(cookieHeader);
+  if (!token) return false;
+  const result = await run(`DELETE FROM sessions WHERE token = ?`, [token]);
+  return result.changes > 0;
 }
 
 export async function createDiscordLoginLink(
@@ -158,22 +196,45 @@ export async function consumeDiscordLoginLink(
 ): Promise<{ token: string; isAdmin: boolean; name: string } | null> {
   await schemaReady;
   await pruneExpiredIfNeeded();
+  await run('BEGIN IMMEDIATE TRANSACTION');
+  try {
+    const link = await get<DbDiscordLoginRow>(
+      `SELECT discord_user_id as discordUserId, name, guild_id as guildId, is_admin as isAdmin, expires_at as expiresAt
+       FROM discord_login_links WHERE token = ?`,
+      [token]
+    );
 
-  const link = await get<DbDiscordLoginRow>(
-    `SELECT discord_user_id as discordUserId, name, guild_id as guildId, is_admin as isAdmin, expires_at as expiresAt
-     FROM discord_login_links WHERE token = ?`,
-    [token]
-  );
+    if (!link) {
+      await run('ROLLBACK');
+      return null;
+    }
 
-  if (!link) return null;
+    // One-time token: atomically consume.
+    const deleteResult = await run(`DELETE FROM discord_login_links WHERE token = ?`, [token]);
+    if (deleteResult.changes === 0) {
+      await run('ROLLBACK');
+      return null;
+    }
 
-  // One-time token: consume immediately.
-  await run(`DELETE FROM discord_login_links WHERE token = ?`, [token]);
+    if (link.expiresAt <= Date.now()) {
+      await run('COMMIT');
+      return null;
+    }
 
-  if (link.expiresAt <= Date.now()) {
-    return null;
+    const sessionToken = await createSession(
+      `discord:${link.discordUserId}`,
+      link.name,
+      link.isAdmin === 1,
+      link.guildId
+    );
+    await run('COMMIT');
+    return { token: sessionToken, isAdmin: link.isAdmin === 1, name: link.name };
+  } catch (error) {
+    try {
+      await run('ROLLBACK');
+    } catch {
+      // Ignore rollback failures.
+    }
+    throw error;
   }
-
-  const sessionToken = await createSession(`discord:${link.discordUserId}`, link.name, link.isAdmin === 1);
-  return { token: sessionToken, isAdmin: link.isAdmin === 1, name: link.name };
 }

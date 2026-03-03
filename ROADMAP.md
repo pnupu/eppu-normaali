@@ -1,6 +1,6 @@
 # Eppu Roadmap
 
-Last updated: 2026-02-24
+Last updated: 2026-03-03
 
 ## Product Direction
 
@@ -83,3 +83,29 @@ Deliver a fast, polished, mobile-friendly web UI that runs well on Raspberry Pi.
 ## Immediate Next Step
 
 Start Milestone 1 with frontend architecture cleanup and UI rebuild.
+
+## Playback Investigation Plan (Paused)
+
+### Status
+
+Blocked until Raspberry Pi remote access is available again.
+
+### Why Paused
+
+Meaningful playback debugging must run on the Pi environment (real network, CPU/memory, and voice stack behavior).
+
+### Planned Work Once Pi Access Is Restored
+
+1. Increase FFmpeg and playback pipeline logging (env-gated, high-detail timestamps).
+2. Capture baseline playback traces on Pi using a repeatable test playlist.
+3. Run runtime/package-manager comparisons (`bun`, `npm`, `yarn`) on the same code revision.
+4. Check GC correlation in Node runs (`--trace-gc`) and compare with playback glitches.
+5. Continue with secure remote SSH approach so Pi debugging is not tied to being at home.
+
+### Resume Criteria
+
+Remote SSH access to Pi is working and stable; then resume this plan immediately.
+
+### Note
+
+Playback investigation is documented and intentionally paused for now. Switching to other work until Pi access is back.

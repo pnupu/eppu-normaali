@@ -1,4 +1,4 @@
-import { WebSearchResult } from './types';
+import { PlaybackStateMap, PlaylistDetail, PlaylistSummary, VoiceKeyword, WebSearchResult } from './types';
 
 export const appState = {
   currentGuild: null as string | null,
@@ -16,4 +16,20 @@ export const appState = {
   dragFromIndex: null as number | null,
   hasFetchedStateSuccessfully: false,
   hasActiveSong: false,
+  playlistSongDragFromIndex: null as number | null,
+  playbackState: {} as PlaybackStateMap,
+  playlists: [] as PlaylistSummary[],
+  playlistsNextCursor: null as string | null,
+  selectedPlaylistId: null as string | null,
+  selectedPlaylist: null as PlaylistDetail | null,
+  playlistSearchQuery: '',
+  playlistSongSearchQuery: '',
+  playlistListBusy: false,
+  playlistDetailBusy: false,
+  playlistLoadMoreBusy: false,
+  playlistSongsLoadMoreBusy: false,
+  queueSelectModalOpen: false,
+  voiceKeywords: [] as VoiceKeyword[],
+  voiceKeywordsNextCursor: null as string | null,
+  voiceKeywordsBusy: false,
 };

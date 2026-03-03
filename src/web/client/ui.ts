@@ -1,6 +1,6 @@
 import { dom, escapeHtml, setVisible } from './dom';
 import { appState } from './state';
-import { GuildPlaybackState, PlaybackStateMap, PollBadgeState, WebSearchResult } from './types';
+import { GuildPlaybackState, PlaybackStateMap, PlaylistDetail, PlaylistSummary, PollBadgeState, VoiceKeyword, WebSearchResult } from './types';
 
 export function enableLowPowerModeIfNeeded(): void {
   const cores = navigator.hardwareConcurrency || 0;
@@ -153,4 +153,123 @@ export function renderPlaybackState(state: PlaybackStateMap): void {
   const guildState = pickActiveGuild(state);
   renderNowPlaying(guildState);
   renderQueue(guildState?.queue || []);
+}
+
+function playlistItemTemplate(item: PlaylistSummary, active: boolean): string {
+  return `
+    <button class="playlist-item ${active ? 'active' : ''}" type="button" data-playlist-id="${escapeHtml(item.id)}">
+      <div class="playlist-item-title">${escapeHtml(item.name)}</div>
+      <div class="playlist-item-meta">${item.songCount} kappaletta</div>
+    </button>
+  `;
+}
+
+export function renderPlaylistList(playlists: PlaylistSummary[], selectedId: string | null, showLoadMore: boolean): void {
+  if (!playlists.length) {
+    dom.playlistList.innerHTML = '<p class="playlist-empty">Ei soittolistoja vielä.</p>';
+  } else {
+    dom.playlistList.innerHTML = playlists
+      .map((item) => playlistItemTemplate(item, selectedId === item.id))
+      .join('');
+  }
+  setVisible(dom.playlistLoadMoreBtn, showLoadMore);
+}
+
+function playlistSongTemplate(song: PlaylistDetail['songs'][number]): string {
+  return `
+    <div class="playlist-song-item" draggable="true" data-playlist-song-index="${song.position}">
+      <span class="drag" title="Vedä järjestyksen vaihtoon">::</span>
+      <div class="title-wrap">
+        <span class="title">${escapeHtml(song.title)}</span>
+        <span class="by">Lisäsi ${escapeHtml(song.addedBy)}</span>
+      </div>
+      <button class="remove-btn" type="button" data-playlist-remove-song="${escapeHtml(song.id)}">Poista</button>
+    </div>
+  `;
+}
+
+export function renderPlaylistDetail(detail: PlaylistDetail | null, showSongsLoadMore: boolean): void {
+  if (!detail) {
+    dom.playlistTitle.textContent = 'Valitse soittolista';
+    dom.playlistSongList.innerHTML = '<p class="playlist-empty">Valitse vasemmalta soittolista hallintaan.</p>';
+    dom.renamePlaylistBtn.disabled = true;
+    dom.deletePlaylistBtn.disabled = true;
+    dom.playPlaylistBtn.disabled = true;
+    dom.playPlaylistShuffleBtn.disabled = true;
+    dom.saveQueueToPlaylistBtn.disabled = true;
+    dom.saveSelectedQueueBtn.disabled = true;
+    dom.playlistSongUrlInput.disabled = true;
+    dom.playlistSongSearchInput.disabled = true;
+    setVisible(dom.playlistSongsLoadMoreBtn, false);
+    return;
+  }
+
+  dom.playlistTitle.textContent = detail.name;
+  dom.renamePlaylistBtn.disabled = false;
+  dom.deletePlaylistBtn.disabled = false;
+  dom.playPlaylistBtn.disabled = false;
+  dom.playPlaylistShuffleBtn.disabled = false;
+  dom.saveQueueToPlaylistBtn.disabled = false;
+  dom.saveSelectedQueueBtn.disabled = false;
+  dom.playlistSongUrlInput.disabled = false;
+  dom.playlistSongSearchInput.disabled = false;
+  if (!detail.songs.length) {
+    dom.playlistSongList.innerHTML = '<p class="playlist-empty">Soittolistassa ei ole kappaleita.</p>';
+  } else {
+    dom.playlistSongList.innerHTML = detail.songs
+      .map((song) => playlistSongTemplate(song))
+      .join('');
+  }
+  setVisible(dom.playlistSongsLoadMoreBtn, showSongsLoadMore);
+}
+
+interface QueueSelectionItem {
+  key: string;
+  title: string;
+  meta: string;
+  checked: boolean;
+}
+
+export function renderQueueSelectionList(items: QueueSelectionItem[]): void {
+  if (!items.length) {
+    dom.queueSelectList.innerHTML = '<p class="playlist-empty">Jonossa ei ole valittavia kappaleita.</p>';
+    return;
+  }
+  dom.queueSelectList.innerHTML = items
+    .map((item) => `
+      <div class="queue-select-item">
+        <label>
+          <input type="checkbox" data-queue-select="${escapeHtml(item.key)}" ${item.checked ? 'checked' : ''}>
+          <span>
+            <strong>${escapeHtml(item.title)}</strong>
+            <span class="meta">${escapeHtml(item.meta)}</span>
+          </span>
+        </label>
+      </div>
+    `)
+    .join('');
+}
+
+function voiceKeywordItemTemplate(item: VoiceKeyword): string {
+  return `
+    <div class="voice-keyword-item">
+      <div>
+        <div class="voice-keyword-title">${escapeHtml(item.phrase)}</div>
+        <a class="voice-keyword-url" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">${escapeHtml(item.url)}</a>
+      </div>
+      <div class="voice-keyword-actions">
+        <button class="btn btn-ghost tiny" type="button" data-voice-keyword-use="${escapeHtml(item.phrase)}">Muokkaa</button>
+        <button class="btn btn-ghost tiny" type="button" data-voice-keyword-delete="${escapeHtml(item.phrase)}">Poista</button>
+      </div>
+    </div>
+  `;
+}
+
+export function renderVoiceKeywordList(items: VoiceKeyword[], showLoadMore: boolean): void {
+  if (!items.length) {
+    dom.voiceKeywordList.innerHTML = '<p class="playlist-empty">Ei avainsanoja vielä.</p>';
+  } else {
+    dom.voiceKeywordList.innerHTML = items.map((item) => voiceKeywordItemTemplate(item)).join('');
+  }
+  setVisible(dom.voiceKeywordLoadMoreBtn, showLoadMore);
 }

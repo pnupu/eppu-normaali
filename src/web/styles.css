@@ -257,6 +257,58 @@ h2 {
   gap: 8px;
 }
 
+.voice-debug {
+  margin-top: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.voice-keywords {
+  margin-top: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.voice-keyword-list {
+  display: grid;
+  gap: 6px;
+  max-height: 210px;
+  overflow: auto;
+}
+
+.voice-keyword-item {
+  border: 1px solid rgba(142, 169, 197, 0.24);
+  border-radius: 10px;
+  background: rgba(8, 16, 27, 0.85);
+  padding: 8px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.voice-keyword-title {
+  font-weight: 700;
+}
+
+.voice-keyword-url {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  text-decoration: none;
+  word-break: break-all;
+}
+
+.voice-keyword-actions {
+  display: grid;
+  gap: 6px;
+}
+
+.btn.ptt-active {
+  border-color: rgba(121, 244, 190, 0.6);
+  background: linear-gradient(135deg, #1c624e, #185f87);
+  color: #edfff8;
+}
+
 .status-msg {
   margin: 8px 0 0;
   color: var(--accent-a);
@@ -365,6 +417,176 @@ h2 {
   margin-top: 8px;
   display: grid;
   gap: 7px;
+}
+
+.playlist-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.playlist-top-controls {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 1fr;
+}
+
+.playlist-layout {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 1fr;
+}
+
+.playlist-library {
+  border: 1px solid rgba(142, 169, 197, 0.24);
+  border-radius: var(--radius-s);
+  background: rgba(7, 15, 25, 0.65);
+  padding: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.playlist-list {
+  display: grid;
+  gap: 6px;
+  max-height: 340px;
+  overflow: auto;
+}
+
+.playlist-item {
+  width: 100%;
+  border: 1px solid rgba(142, 169, 197, 0.26);
+  border-radius: 10px;
+  background: rgba(8, 16, 27, 0.9);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  padding: 8px 10px;
+}
+
+.playlist-item.active {
+  border-color: rgba(69, 208, 255, 0.8);
+  background: rgba(14, 33, 52, 0.95);
+}
+
+.playlist-item-title {
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.playlist-item-meta {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.playlist-detail {
+  border: 1px solid rgba(142, 169, 197, 0.24);
+  border-radius: var(--radius-s);
+  background: rgba(7, 15, 25, 0.65);
+  padding: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.playlist-detail-head {
+  display: grid;
+  gap: 6px;
+}
+
+.playlist-detail-head h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.playlist-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.playlist-inline-form {
+  margin: 0;
+}
+
+.playlist-queue-tools {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: 1fr;
+}
+
+.playlist-song-list {
+  display: grid;
+  gap: 6px;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.playlist-song-item {
+  border: 1px solid rgba(142, 169, 197, 0.24);
+  border-radius: 10px;
+  background: rgba(8, 16, 27, 0.85);
+  padding: 8px;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: 22px 1fr auto;
+  align-items: center;
+}
+
+.playlist-song-item.dragging {
+  opacity: 0.65;
+}
+
+.playlist-song-item .drag {
+  color: #83a0be;
+  user-select: none;
+  cursor: grab;
+}
+
+.playlist-song-item .title {
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.playlist-song-item .by {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.74rem;
+}
+
+.playlist-empty {
+  margin: 0;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.queue-select-list {
+  margin-top: 8px;
+  display: grid;
+  gap: 6px;
+  max-height: 340px;
+  overflow: auto;
+}
+
+.queue-select-item {
+  border: 1px solid rgba(142, 169, 197, 0.24);
+  border-radius: 10px;
+  background: rgba(8, 16, 27, 0.85);
+  padding: 8px;
+}
+
+.queue-select-item label {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+  align-items: start;
+}
+
+.queue-select-item .meta {
+  color: var(--text-muted);
+  font-size: 0.76rem;
 }
 
 .queue-item {
@@ -522,6 +744,18 @@ h2 {
 
   .span-2 {
     grid-column: span 2;
+  }
+
+  .playlist-top-controls {
+    grid-template-columns: 1fr auto;
+  }
+
+  .playlist-layout {
+    grid-template-columns: minmax(240px, 0.8fr) minmax(0, 1.2fr);
+  }
+
+  .playlist-queue-tools {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
