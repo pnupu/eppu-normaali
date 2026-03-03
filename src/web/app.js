@@ -718,7 +718,14 @@
   function authFailureFallback() {
     if (!appState.authRequired)
       return;
-    window.location.reload();
+    if (appState.pollTimer) {
+      window.clearTimeout(appState.pollTimer);
+      appState.pollTimer = null;
+    }
+    setVisible(dom.mainSection, false);
+    setVisible(dom.loginSection, true);
+    setLoginHint("Istunto vanheni. Käytä /web-login ja avaa uusi kertakirjautumislinkki.");
+    setPollBadge("degraded");
   }
   function currentGuildState() {
     if (!appState.currentGuild)
@@ -750,6 +757,7 @@
       schedulePoll();
       return;
     }
+    let shouldScheduleNextPoll = true;
     appState.isFetchingState = true;
     if (!appState.hasFetchedStateSuccessfully) {
       setPollBadge("syncing");
@@ -761,6 +769,7 @@
         return;
       }
       if (result.kind === "unauthorized") {
+        shouldScheduleNextPoll = false;
         authFailureFallback();
         return;
       }
@@ -778,7 +787,9 @@
       }
     } finally {
       appState.isFetchingState = false;
-      schedulePoll();
+      if (shouldScheduleNextPoll) {
+        schedulePoll();
+      }
     }
   }
   async function fetchMe() {
