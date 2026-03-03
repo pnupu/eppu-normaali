@@ -20,7 +20,7 @@ interface DbSessionRow {
 interface DbDiscordLoginRow {
   discordUserId: string;
   name: string;
-  guildId: string;
+  guildId: string | null;
   isAdmin: number;
   expiresAt: number;
 }
@@ -98,13 +98,18 @@ const schemaReady = (async () => {
 
   await run(`CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_login_links_expires ON discord_login_links(expires_at)`);
-  await run(`CREATE INDEX IF NOT EXISTS idx_sessions_guild ON sessions(guild_id)`);
 
   // Migration for older DBs created before guild_id existed.
-  const columns = await all<{ name: string }>(`PRAGMA table_info(sessions)`);
-  if (!columns.some((column) => column.name === 'guild_id')) {
+  const sessionColumns = await all<{ name: string }>(`PRAGMA table_info(sessions)`);
+  if (!sessionColumns.some((column) => column.name === 'guild_id')) {
     await run(`ALTER TABLE sessions ADD COLUMN guild_id TEXT`);
   }
+  const loginLinkColumns = await all<{ name: string }>(`PRAGMA table_info(discord_login_links)`);
+  if (!loginLinkColumns.some((column) => column.name === 'guild_id')) {
+    await run(`ALTER TABLE discord_login_links ADD COLUMN guild_id TEXT`);
+  }
+
+  await run(`CREATE INDEX IF NOT EXISTS idx_sessions_guild ON sessions(guild_id)`);
 })();
 
 async function pruneExpiredIfNeeded(): Promise<void> {
@@ -225,7 +230,7 @@ export async function consumeDiscordLoginLink(
       `discord:${link.discordUserId}`,
       link.name,
       link.isAdmin === 1,
-      link.guildId
+      link.guildId || process.env.WEB_DEFAULT_GUILD_ID?.trim() || null
     );
     await run('COMMIT');
     return { token: sessionToken, isAdmin: link.isAdmin === 1, name: link.name };
