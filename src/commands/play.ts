@@ -137,6 +137,92 @@ function ytdlpVerboseLogsEnabled(): boolean {
   if (!value) return false;
   return value !== '0' && value !== 'false' && value !== 'off' && value !== 'no';
 }
+function ffmpegVerboseLogsEnabled(): boolean {
+  const value = process.env.FFMPEG_VERBOSE_LOGS?.trim().toLowerCase();
+  if (!value) return false;
+  return value !== '0' && value !== 'false' && value !== 'off' && value !== 'no';
+}
+function ffmpegLogLevel(): string {
+  const configured = process.env.FFMPEG_LOGLEVEL?.trim();
+  if (configured) return configured;
+  return ffmpegVerboseLogsEnabled() ? 'info' : 'error';
+}
+function ffmpegStatsIntervalMs(): number {
+  const raw = Number.parseInt(process.env.FFMPEG_STATS_INTERVAL_MS || '5000', 10);
+  if (!Number.isFinite(raw)) return 5000;
+  return Math.max(1000, raw);
+}
+function wireFfmpegDiagnostics(
+  ffmpeg: ChildProcessWithoutNullStreams,
+  label: string
+): void {
+  const startedAt = Date.now();
+  const verbose = ffmpegVerboseLogsEnabled();
+  const statsIntervalMs = ffmpegStatsIntervalMs();
+  let stdoutBytes = 0;
+  let lastStatsBytes = 0;
+  let carry = '';
+  let statsTimer: ReturnType<typeof setInterval> | null = null;
+
+  const shouldLogLine = (line: string): boolean => {
+    if (!line) return false;
+    if (verbose) return true;
+    const lowered = line.toLowerCase();
+    return lowered.includes('error')
+      || lowered.includes('warning')
+      || lowered.includes('drop')
+      || lowered.includes('invalid')
+      || lowered.includes('non-monotonous')
+      || lowered.includes('clipping')
+      || lowered.includes('speed=');
+  };
+
+  const logLine = (line: string) => {
+    if (!shouldLogLine(line)) return;
+    console.log(`[ffmpeg][${label}] +${Date.now() - startedAt}ms ${line}`);
+  };
+
+  ffmpeg.stdout.on('data', (chunk: Buffer) => {
+    stdoutBytes += chunk.length;
+  });
+
+  ffmpeg.stderr.on('data', (data) => {
+    const merged = (carry + data.toString()).replace(/\r/g, '\n');
+    const lines = merged.split('\n');
+    carry = lines.pop() || '';
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      logLine(trimmed);
+    }
+  });
+
+  if (verbose) {
+    statsTimer = setInterval(() => {
+      const delta = stdoutBytes - lastStatsBytes;
+      lastStatsBytes = stdoutBytes;
+      const rateBps = Math.round(delta / (statsIntervalMs / 1000));
+      console.log(
+        `[ffmpeg][${label}] +${Date.now() - startedAt}ms stats bytes=${stdoutBytes} rateBps=${rateBps}`
+      );
+    }, statsIntervalMs);
+  }
+
+  ffmpeg.on('exit', (code, signal) => {
+    if (carry.trim()) {
+      logLine(carry.trim());
+      carry = '';
+    }
+    if (statsTimer) {
+      clearInterval(statsTimer);
+      statsTimer = null;
+    }
+    console.log(
+      `[ffmpeg][${label}] exit code=${code ?? 'null'} signal=${signal ?? 'null'} `
+      + `elapsedMs=${Date.now() - startedAt} stdoutBytes=${stdoutBytes}`
+    );
+  });
+}
 interface YtDlpRuntimeOptions {
   jsRuntimes: string;
   cookiesFilePath: string;
@@ -1485,7 +1571,7 @@ function createFfmpegStream(url: string): Readable {
     '-i', url,
     '-analyzeduration', '0',
     '-probesize', '32768',        // Minimize probe size to reduce memory usage
-    '-loglevel', 'info',
+    '-loglevel', ffmpegLogLevel(),
     '-f', 's16le',
     '-ar', '48000',
     '-ac', '2',
@@ -1493,30 +1579,10 @@ function createFfmpegStream(url: string): Readable {
     '-bufsize', '64k',         // Small buffer size to reduce memory usage
     'pipe:1'
   ]);
+  wireFfmpegDiagnostics(ffmpeg, 'direct-url');
   // Handle process errors
   ffmpeg.on('error', error => {
     console.error('FFmpeg process error:', error);
-  });
-  // Handle process exit
-  ffmpeg.on('exit', (code, signal) => {
-    if (code !== 0) {
-      console.log(`FFmpeg process exited with code ${code} and signal ${signal}`);
-    } else {
-      console.log('FFmpeg process completed successfully');
-    }
-  });
-  // Handle stderr to see what FFmpeg is complaining about
-  ffmpeg.stderr.on('data', (data) => {
-    const errorMessage = data.toString();
-    console.error('FFmpeg stderr:', errorMessage);
-    
-    // Check for specific error patterns
-    if (errorMessage.includes('403') || errorMessage.includes('Forbidden')) {
-      console.error('FFmpeg: Access forbidden - URL may have expired');
-    }
-    if (errorMessage.includes('404') || errorMessage.includes('Not Found')) {
-      console.error('FFmpeg: URL not found - URL may have expired');
-    }
   });
   // Handle stdout errors
   const stdout = ffmpeg.stdout;
@@ -1540,7 +1606,7 @@ function createYouTubeStream(youtubeUrl: string): Readable {
     '-i', 'pipe:0',
     '-analyzeduration', '0',
     '-probesize', '32768',
-    '-loglevel', 'error',
+    '-loglevel', ffmpegLogLevel(),
     '-f', 's16le',
     '-ar', '48000',
     '-ac', '2',
@@ -1559,6 +1625,21 @@ function createYouTubeStream(youtubeUrl: string): Readable {
   let ytdlpExited = false;
   let ffmpegExited = false;
   let sawCookieAuthError = false;
+  const ytdlpStatsEnabled = ffmpegVerboseLogsEnabled();
+  const ytdlpStatsIntervalMs = ffmpegStatsIntervalMs();
+  let ytdlpLastStatsBytes = 0;
+  let ytdlpStatsTimer: ReturnType<typeof setInterval> | null = null;
+  if (ytdlpStatsEnabled) {
+    const ytdlpStartedAt = Date.now();
+    ytdlpStatsTimer = setInterval(() => {
+      const delta = ytdlpStdoutBytes - ytdlpLastStatsBytes;
+      ytdlpLastStatsBytes = ytdlpStdoutBytes;
+      const rateBps = Math.round(delta / (ytdlpStatsIntervalMs / 1000));
+      console.log(
+        `[yt-dlp][stream] +${Date.now() - ytdlpStartedAt}ms stats bytes=${ytdlpStdoutBytes} rateBps=${rateBps}`
+      );
+    }, ytdlpStatsIntervalMs);
+  }
   ytdlp.stderr.on('data', (data) => {
     const line = data.toString().trim();
     if (!line) return;
@@ -1578,6 +1659,10 @@ function createYouTubeStream(youtubeUrl: string): Readable {
     console.error('yt-dlp process error:', error);
   });
   ytdlp.on('exit', (code) => {
+    if (ytdlpStatsTimer) {
+      clearInterval(ytdlpStatsTimer);
+      ytdlpStatsTimer = null;
+    }
     ytdlpExited = true;
     if (code !== 0) console.log(`yt-dlp exited with code ${code}`);
     if (code !== 0 && !ffmpegExited) {
@@ -1597,17 +1682,12 @@ function createYouTubeStream(youtubeUrl: string): Readable {
   ffmpeg.on('exit', (code) => {
     ffmpegExited = true;
     if (code !== 0) console.log(`FFmpeg exited with code ${code}`);
-    else console.log('FFmpeg completed successfully');
-  });
-  ffmpeg.stderr.on('data', (data) => {
-    const msg = data.toString();
-    if (msg.includes('403') || msg.includes('Forbidden')) {
-      console.error('FFmpeg: Access forbidden');
-    }
-    if (msg.toLowerCase().includes('error')) {
-      console.error('FFmpeg stderr:', msg.trim());
+    if (ytdlpStatsTimer) {
+      clearInterval(ytdlpStatsTimer);
+      ytdlpStatsTimer = null;
     }
   });
+  wireFfmpegDiagnostics(ffmpeg, `yt-pipe:${youtubeUrl}`);
   ffmpeg.stdout.on('error', error => {
     logStreamIssue('FFmpeg stdout error', error);
   });
@@ -1631,7 +1711,7 @@ function createPrefetchedFileStream(filePath: string): Readable {
     '-i', filePath,
     '-analyzeduration', '0',
     '-probesize', '32768',
-    '-loglevel', 'error',
+    '-loglevel', ffmpegLogLevel(),
     '-f', 's16le',
     '-ar', '48000',
     '-ac', '2',
@@ -1639,6 +1719,7 @@ function createPrefetchedFileStream(filePath: string): Readable {
     '-bufsize', '64k',
     'pipe:1'
   ]);
+  wireFfmpegDiagnostics(ffmpeg, `prefetch:${path.basename(filePath)}`);
   ffmpeg.on('error', error => {
     console.error('[prefetch] FFmpeg process error for prefetched file:', error);
   });
@@ -1647,10 +1728,6 @@ function createPrefetchedFileStream(filePath: string): Readable {
       console.error(`[prefetch] FFmpeg exited with code ${code} for prefetched file ${path.basename(filePath)}`);
     }
     removePrefetchFile(filePath);
-  });
-  ffmpeg.stderr.on('data', (data) => {
-    const msg = data.toString().trim();
-    if (msg) console.error('[prefetch] FFmpeg stderr:', msg);
   });
   const passthrough = new PassThrough();
   ffmpeg.stdout.pipe(passthrough);
