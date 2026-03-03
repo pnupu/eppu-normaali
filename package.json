@@ -12,7 +12,7 @@
     },
     "dependencies": {
         "@discordjs/opus": "^0.10.0",
-        "@discordjs/voice": "0.19.0",
+        "@discordjs/voice": "^0.19.1-pr-11005.1765538001-01ed3c43b",
         "discord.js": "14.25.1",
         "dotenv": "^16.5.0",
         "ffmpeg-static": "^5.2.0",
