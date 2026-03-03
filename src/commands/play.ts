@@ -1603,6 +1603,9 @@ function createYouTubeStream(youtubeUrl: string): Readable {
     youtubeUrl
   ]));
   const ffmpeg = spawn('ffmpeg', [
+    // Pace decode in real-time to avoid burst-decoding entire tracks into memory.
+    // This reduces large initial CPU/memory spikes that can surface as playback hiccups.
+    '-re',
     '-i', 'pipe:0',
     '-analyzeduration', '0',
     '-probesize', '32768',
