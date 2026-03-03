@@ -195,38 +195,6 @@
     });
     return res.json();
   }
-  async function postVoiceCommand(transcript) {
-    const res = await apiFetch("/api/voice-command", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ guildId: appState.currentGuild, transcript })
-    });
-    return res.json();
-  }
-  async function fetchVoiceKeywords(query, cursor, limit) {
-    const params = new URLSearchParams;
-    if (query.trim())
-      params.set("query", query.trim());
-    if (cursor)
-      params.set("cursor", cursor);
-    params.set("limit", String(limit));
-    const res = await apiFetch(`/api/voice-keywords?${params.toString()}`);
-    return res.json();
-  }
-  async function upsertVoiceKeywordApi(phrase, url) {
-    const res = await apiFetch("/api/voice-keywords", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ phrase, url })
-    });
-    return res.json();
-  }
-  async function deleteVoiceKeywordApi(phrase) {
-    const res = await apiFetch(`/api/voice-keywords/${encodeURIComponent(phrase)}`, {
-      method: "DELETE"
-    });
-    return res.json();
-  }
   async function searchYouTube(query) {
     const res = await apiFetch("/api/search", {
       method: "POST",
@@ -242,105 +210,6 @@
       results: Array.isArray(data.results) ? data.results : []
     };
   }
-  async function parseApiJson(res) {
-    return res.json();
-  }
-  async function fetchPlaylists(query, cursor, limit) {
-    const params = new URLSearchParams;
-    if (query.trim())
-      params.set("query", query.trim());
-    if (cursor)
-      params.set("cursor", cursor);
-    params.set("limit", String(limit));
-    const res = await apiFetch(`/api/playlists?${params.toString()}`);
-    return parseApiJson(res);
-  }
-  async function createPlaylistApi(name) {
-    const res = await apiFetch("/api/playlists", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name })
-    });
-    return parseApiJson(res);
-  }
-  async function renamePlaylistApi(playlistId, name) {
-    const res = await apiFetch(`/api/playlists/${encodeURIComponent(playlistId)}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name })
-    });
-    return parseApiJson(res);
-  }
-  async function deletePlaylistApi(playlistId) {
-    const res = await apiFetch(`/api/playlists/${encodeURIComponent(playlistId)}`, {
-      method: "DELETE"
-    });
-    return parseApiJson(res);
-  }
-  async function fetchPlaylistDetail(playlistId, songQuery, songCursor, songLimit) {
-    const params = new URLSearchParams;
-    if (songQuery.trim())
-      params.set("songQuery", songQuery.trim());
-    if (songCursor)
-      params.set("songCursor", songCursor);
-    params.set("songLimit", String(songLimit));
-    const res = await apiFetch(`/api/playlists/${encodeURIComponent(playlistId)}?${params.toString()}`);
-    return parseApiJson(res);
-  }
-  async function addPlaylistSongApi(playlistId, url) {
-    const res = await apiFetch(`/api/playlists/${encodeURIComponent(playlistId)}/songs`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url })
-    });
-    return parseApiJson(res);
-  }
-  async function removePlaylistSongApi(playlistId, songId) {
-    const res = await apiFetch(`/api/playlists/${encodeURIComponent(playlistId)}/songs/${encodeURIComponent(songId)}`, {
-      method: "DELETE"
-    });
-    return parseApiJson(res);
-  }
-  async function movePlaylistSongApi(playlistId, fromIndex, toIndex) {
-    const res = await apiFetch(`/api/playlists/${encodeURIComponent(playlistId)}/songs/move`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fromIndex, toIndex })
-    });
-    return parseApiJson(res);
-  }
-  async function playPlaylistApi(playlistId, guildId, shuffle) {
-    const res = await apiFetch(`/api/playlists/${encodeURIComponent(playlistId)}/play`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ guildId, shuffle })
-    });
-    return parseApiJson(res);
-  }
-  async function createPlaylistFromQueueApi(guildId, name, includeCurrent, selectedIndices) {
-    const res = await apiFetch("/api/playlists/from-queue", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ guildId, name, includeCurrent, selectedIndices })
-    });
-    return parseApiJson(res);
-  }
-  async function copyQueueToPlaylistApi(playlistId, guildId, includeCurrent, selectedIndices) {
-    const res = await apiFetch(`/api/playlists/${encodeURIComponent(playlistId)}/from-queue`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ guildId, includeCurrent, selectedIndices })
-    });
-    return parseApiJson(res);
-  }
-  async function importYouTubePlaylistApi(name, url) {
-    const res = await apiFetch("/api/playlists/import-youtube", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, url })
-    });
-    return parseApiJson(res);
-  }
 
   // src/web/client/dom.ts
   function byId(id) {
@@ -349,6 +218,16 @@
       throw new Error(`Missing required element #${id}`);
     }
     return el;
+  }
+  function byIdOptional(id, tagName = "div") {
+    const el = document.getElementById(id);
+    if (el) {
+      return el;
+    }
+    const stub = document.createElement(tagName);
+    stub.id = id;
+    stub.classList.add("hidden");
+    return stub;
   }
   var dom = {
     mainSection: byId("mainSection"),
@@ -370,44 +249,44 @@
     nowPlayingMeta: byId("nowPlayingMeta"),
     searchInput: byId("searchInput"),
     searchResults: byId("searchResults"),
-    pttBtn: byId("pttBtn"),
-    voiceDebugTranscript: byId("voiceDebugTranscript"),
-    voiceStatus: byId("voiceStatus"),
-    voiceKeywordForm: byId("voiceKeywordForm"),
-    voiceKeywordPhraseInput: byId("voiceKeywordPhraseInput"),
-    voiceKeywordUrlInput: byId("voiceKeywordUrlInput"),
-    voiceKeywordList: byId("voiceKeywordList"),
-    voiceKeywordLoadMoreBtn: byId("voiceKeywordLoadMoreBtn"),
-    voiceKeywordStatus: byId("voiceKeywordStatus"),
+    pttBtn: byIdOptional("pttBtn", "button"),
+    voiceDebugTranscript: byIdOptional("voiceDebugTranscript", "p"),
+    voiceStatus: byIdOptional("voiceStatus", "p"),
+    voiceKeywordForm: byIdOptional("voiceKeywordForm", "form"),
+    voiceKeywordPhraseInput: byIdOptional("voiceKeywordPhraseInput", "input"),
+    voiceKeywordUrlInput: byIdOptional("voiceKeywordUrlInput", "input"),
+    voiceKeywordList: byIdOptional("voiceKeywordList"),
+    voiceKeywordLoadMoreBtn: byIdOptional("voiceKeywordLoadMoreBtn", "button"),
+    voiceKeywordStatus: byIdOptional("voiceKeywordStatus", "p"),
     userInfo: byId("userInfo"),
     toastStack: byId("toastStack"),
     urlInput: byId("urlInput"),
-    playlistList: byId("playlistList"),
-    playlistLoadMoreBtn: byId("playlistLoadMoreBtn"),
-    playlistSearchInput: byId("playlistSearchInput"),
-    createPlaylistBtn: byId("createPlaylistBtn"),
-    playlistTitle: byId("playlistTitle"),
-    renamePlaylistBtn: byId("renamePlaylistBtn"),
-    deletePlaylistBtn: byId("deletePlaylistBtn"),
-    playPlaylistBtn: byId("playPlaylistBtn"),
-    playPlaylistShuffleBtn: byId("playPlaylistShuffleBtn"),
-    playlistSongForm: byId("playlistSongForm"),
-    playlistSongUrlInput: byId("playlistSongUrlInput"),
-    playlistSongList: byId("playlistSongList"),
-    playlistSongSearchInput: byId("playlistSongSearchInput"),
-    playlistSongsLoadMoreBtn: byId("playlistSongsLoadMoreBtn"),
-    playlistStatus: byId("playlistStatus"),
-    saveQueueToPlaylistBtn: byId("saveQueueToPlaylistBtn"),
-    saveSelectedQueueBtn: byId("saveSelectedQueueBtn"),
-    createPlaylistFromQueueBtn: byId("createPlaylistFromQueueBtn"),
-    playlistImportForm: byId("playlistImportForm"),
-    playlistImportNameInput: byId("playlistImportNameInput"),
-    playlistImportUrlInput: byId("playlistImportUrlInput"),
-    queueSelectModal: byId("queueSelectModal"),
-    closeQueueSelectBtn: byId("closeQueueSelectBtn"),
-    queueSelectList: byId("queueSelectList"),
-    queueSelectStatus: byId("queueSelectStatus"),
-    queueSelectConfirmBtn: byId("queueSelectConfirmBtn")
+    playlistList: byIdOptional("playlistList"),
+    playlistLoadMoreBtn: byIdOptional("playlistLoadMoreBtn", "button"),
+    playlistSearchInput: byIdOptional("playlistSearchInput", "input"),
+    createPlaylistBtn: byIdOptional("createPlaylistBtn", "button"),
+    playlistTitle: byIdOptional("playlistTitle", "h3"),
+    renamePlaylistBtn: byIdOptional("renamePlaylistBtn", "button"),
+    deletePlaylistBtn: byIdOptional("deletePlaylistBtn", "button"),
+    playPlaylistBtn: byIdOptional("playPlaylistBtn", "button"),
+    playPlaylistShuffleBtn: byIdOptional("playPlaylistShuffleBtn", "button"),
+    playlistSongForm: byIdOptional("playlistSongForm", "form"),
+    playlistSongUrlInput: byIdOptional("playlistSongUrlInput", "input"),
+    playlistSongList: byIdOptional("playlistSongList"),
+    playlistSongSearchInput: byIdOptional("playlistSongSearchInput", "input"),
+    playlistSongsLoadMoreBtn: byIdOptional("playlistSongsLoadMoreBtn", "button"),
+    playlistStatus: byIdOptional("playlistStatus", "p"),
+    saveQueueToPlaylistBtn: byIdOptional("saveQueueToPlaylistBtn", "button"),
+    saveSelectedQueueBtn: byIdOptional("saveSelectedQueueBtn", "button"),
+    createPlaylistFromQueueBtn: byIdOptional("createPlaylistFromQueueBtn", "button"),
+    playlistImportForm: byIdOptional("playlistImportForm", "form"),
+    playlistImportNameInput: byIdOptional("playlistImportNameInput", "input"),
+    playlistImportUrlInput: byIdOptional("playlistImportUrlInput", "input"),
+    queueSelectModal: byIdOptional("queueSelectModal"),
+    closeQueueSelectBtn: byIdOptional("closeQueueSelectBtn", "button"),
+    queueSelectList: byIdOptional("queueSelectList"),
+    queueSelectStatus: byIdOptional("queueSelectStatus", "p"),
+    queueSelectConfirmBtn: byIdOptional("queueSelectConfirmBtn", "button")
   };
   function setVisible(el, visible) {
     el.classList.toggle("hidden", !visible);
@@ -595,65 +474,6 @@
     renderNowPlaying(guildState);
     renderQueue(guildState?.queue || []);
   }
-  function playlistItemTemplate(item, active) {
-    return `
-    <button class="playlist-item ${active ? "active" : ""}" type="button" data-playlist-id="${escapeHtml(item.id)}">
-      <div class="playlist-item-title">${escapeHtml(item.name)}</div>
-      <div class="playlist-item-meta">${item.songCount} kappaletta</div>
-    </button>
-  `;
-  }
-  function renderPlaylistList(playlists, selectedId, showLoadMore) {
-    if (!playlists.length) {
-      dom.playlistList.innerHTML = '<p class="playlist-empty">Ei soittolistoja vielä.</p>';
-    } else {
-      dom.playlistList.innerHTML = playlists.map((item) => playlistItemTemplate(item, selectedId === item.id)).join("");
-    }
-    setVisible(dom.playlistLoadMoreBtn, showLoadMore);
-  }
-  function playlistSongTemplate(song) {
-    return `
-    <div class="playlist-song-item" draggable="true" data-playlist-song-index="${song.position}">
-      <span class="drag" title="Vedä järjestyksen vaihtoon">::</span>
-      <div class="title-wrap">
-        <span class="title">${escapeHtml(song.title)}</span>
-        <span class="by">Lisäsi ${escapeHtml(song.addedBy)}</span>
-      </div>
-      <button class="remove-btn" type="button" data-playlist-remove-song="${escapeHtml(song.id)}">Poista</button>
-    </div>
-  `;
-  }
-  function renderPlaylistDetail(detail, showSongsLoadMore) {
-    if (!detail) {
-      dom.playlistTitle.textContent = "Valitse soittolista";
-      dom.playlistSongList.innerHTML = '<p class="playlist-empty">Valitse vasemmalta soittolista hallintaan.</p>';
-      dom.renamePlaylistBtn.disabled = true;
-      dom.deletePlaylistBtn.disabled = true;
-      dom.playPlaylistBtn.disabled = true;
-      dom.playPlaylistShuffleBtn.disabled = true;
-      dom.saveQueueToPlaylistBtn.disabled = true;
-      dom.saveSelectedQueueBtn.disabled = true;
-      dom.playlistSongUrlInput.disabled = true;
-      dom.playlistSongSearchInput.disabled = true;
-      setVisible(dom.playlistSongsLoadMoreBtn, false);
-      return;
-    }
-    dom.playlistTitle.textContent = detail.name;
-    dom.renamePlaylistBtn.disabled = false;
-    dom.deletePlaylistBtn.disabled = false;
-    dom.playPlaylistBtn.disabled = false;
-    dom.playPlaylistShuffleBtn.disabled = false;
-    dom.saveQueueToPlaylistBtn.disabled = false;
-    dom.saveSelectedQueueBtn.disabled = false;
-    dom.playlistSongUrlInput.disabled = false;
-    dom.playlistSongSearchInput.disabled = false;
-    if (!detail.songs.length) {
-      dom.playlistSongList.innerHTML = '<p class="playlist-empty">Soittolistassa ei ole kappaleita.</p>';
-    } else {
-      dom.playlistSongList.innerHTML = detail.songs.map((song) => playlistSongTemplate(song)).join("");
-    }
-    setVisible(dom.playlistSongsLoadMoreBtn, showSongsLoadMore);
-  }
   function renderQueueSelectionList(items) {
     if (!items.length) {
       dom.queueSelectList.innerHTML = '<p class="playlist-empty">Jonossa ei ole valittavia kappaleita.</p>';
@@ -671,39 +491,9 @@
       </div>
     `).join("");
   }
-  function voiceKeywordItemTemplate(item) {
-    return `
-    <div class="voice-keyword-item">
-      <div>
-        <div class="voice-keyword-title">${escapeHtml(item.phrase)}</div>
-        <a class="voice-keyword-url" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">${escapeHtml(item.url)}</a>
-      </div>
-      <div class="voice-keyword-actions">
-        <button class="btn btn-ghost tiny" type="button" data-voice-keyword-use="${escapeHtml(item.phrase)}">Muokkaa</button>
-        <button class="btn btn-ghost tiny" type="button" data-voice-keyword-delete="${escapeHtml(item.phrase)}">Poista</button>
-      </div>
-    </div>
-  `;
-  }
-  function renderVoiceKeywordList(items, showLoadMore) {
-    if (!items.length) {
-      dom.voiceKeywordList.innerHTML = '<p class="playlist-empty">Ei avainsanoja vielä.</p>';
-    } else {
-      dom.voiceKeywordList.innerHTML = items.map((item) => voiceKeywordItemTemplate(item)).join("");
-    }
-    setVisible(dom.voiceKeywordLoadMoreBtn, showLoadMore);
-  }
 
   // src/web/client/main.ts
-  var PLAYLIST_LIST_LIMIT = 20;
-  var PLAYLIST_SONG_LIMIT = 80;
-  var VOICE_KEYWORD_LIMIT = 30;
-  var playlistSearchDebounce = null;
-  var playlistSongSearchDebounce = null;
   var queueSelectionKeys = new Set;
-  var pttListening = false;
-  var pttTranscript = "";
-  var pttRecognition = null;
   function currentPollInterval() {
     return document.hidden ? POLL_SLOW_MS : POLL_FAST_MS;
   }
@@ -731,26 +521,6 @@
     if (!appState.currentGuild)
       return null;
     return appState.playbackState[appState.currentGuild] || null;
-  }
-  function renderPlaylistPanels() {
-    renderPlaylistList(appState.playlists, appState.selectedPlaylistId, !!appState.playlistsNextCursor);
-    renderPlaylistDetail(appState.selectedPlaylist, !!appState.selectedPlaylist?.songNextCursor);
-  }
-  function selectedPlaylistSummary() {
-    if (!appState.selectedPlaylistId)
-      return null;
-    return appState.playlists.find((item) => item.id === appState.selectedPlaylistId) || null;
-  }
-  function upsertPlaylistSummary(item) {
-    const index = appState.playlists.findIndex((playlist) => playlist.id === item.id);
-    if (index >= 0) {
-      appState.playlists[index] = item;
-    } else {
-      appState.playlists.unshift(item);
-    }
-  }
-  function removePlaylistSummary(playlistId) {
-    appState.playlists = appState.playlists.filter((item) => item.id !== playlistId);
   }
   async function fetchState() {
     if (appState.isFetchingState) {
@@ -808,12 +578,9 @@
     setVisible(dom.loginSection, false);
     setVisible(dom.mainSection, true);
     renderPlaybackState({});
-    renderPlaylistPanels();
     setPollBadge("ready");
     fetchMe();
     fetchState();
-    refreshPlaylists(true);
-    refreshVoiceKeywords(true);
   }
   function requireGuildBeforeQueue(statusEl) {
     if (appState.currentGuild)
@@ -821,280 +588,6 @@
     setStatus(statusEl, "Palvelinta ei löytynyt. Tarkista botin guild-asetus.", "error");
     showToast("stern", ["Eppu ei löydä kohdepalvelinta juuri nyt."]);
     return false;
-  }
-  function requireSelectedPlaylist() {
-    if (!appState.selectedPlaylistId) {
-      setStatus(dom.playlistStatus, "Valitse ensin soittolista.", "error");
-      return null;
-    }
-    return appState.selectedPlaylistId;
-  }
-  function setPttButtonState(listening) {
-    dom.pttBtn.classList.toggle("ptt-active", listening);
-    dom.pttBtn.textContent = listening ? "Kuuntelen... päästä irti lopettaaksesi" : "Pidä pohjassa ja puhu";
-  }
-  function voiceRecognitionCtor() {
-    const maybeWindow = window;
-    return maybeWindow.SpeechRecognition || maybeWindow.webkitSpeechRecognition || null;
-  }
-  function buildVoiceRecognition() {
-    const Ctor = voiceRecognitionCtor();
-    if (!Ctor)
-      return null;
-    const recognition = new Ctor;
-    recognition.lang = "fi-FI";
-    recognition.interimResults = true;
-    recognition.continuous = false;
-    recognition.maxAlternatives = 1;
-    recognition.onresult = (event) => {
-      const chunks = [];
-      for (let i = 0;i < event.results.length; i += 1) {
-        const part = event.results[i]?.[0]?.transcript || "";
-        if (part.trim())
-          chunks.push(part.trim());
-      }
-      pttTranscript = chunks.join(" ").trim();
-      dom.voiceDebugTranscript.textContent = `Viimeisin puhe: ${pttTranscript || "-"}`;
-    };
-    recognition.onerror = (event) => {
-      if (event.error && event.error !== "no-speech" && event.error !== "aborted") {
-        setStatus(dom.voiceStatus, `Äänentunnistusvirhe: ${event.error}`, "error");
-      }
-    };
-    recognition.onend = () => {
-      const transcript = pttTranscript.trim();
-      pttListening = false;
-      setPttButtonState(false);
-      pttRecognition = null;
-      if (!transcript) {
-        setStatus(dom.voiceStatus, "Puhetta ei tunnistettu.", "error");
-        return;
-      }
-      submitVoiceCommand(transcript);
-    };
-    return recognition;
-  }
-  async function submitVoiceCommand(transcript) {
-    if (!requireGuildBeforeQueue(dom.voiceStatus))
-      return;
-    setStatus(dom.voiceStatus, "Suoritetaan äänikomentoa...");
-    const result = await postVoiceCommand(transcript);
-    if (result.error) {
-      setStatus(dom.voiceStatus, result.message || result.error, "error");
-      showToast("stern", [result.message || result.error]);
-      return;
-    }
-    setStatus(dom.voiceStatus, result.message || "Äänikomento suoritettu", "ok");
-    showToast("happy", [result.message || "Äänikomento valmis"]);
-    appState.stateEtag = "";
-    fetchState();
-  }
-  function startPttCapture() {
-    if (pttListening)
-      return;
-    if (!requireGuildBeforeQueue(dom.voiceStatus))
-      return;
-    pttTranscript = "";
-    dom.voiceDebugTranscript.textContent = "Viimeisin puhe: ...";
-    const recognition = buildVoiceRecognition();
-    if (!recognition) {
-      setStatus(dom.voiceStatus, "Selain ei tue äänentunnistusta tässä näkymässä.", "error");
-      return;
-    }
-    pttRecognition = recognition;
-    try {
-      pttListening = true;
-      setPttButtonState(true);
-      recognition.start();
-    } catch {
-      pttListening = false;
-      setPttButtonState(false);
-      pttRecognition = null;
-      setStatus(dom.voiceStatus, "Äänentunnistus ei käynnistynyt.", "error");
-    }
-  }
-  function stopPttCapture() {
-    if (!pttListening || !pttRecognition)
-      return;
-    try {
-      pttRecognition.stop();
-    } catch {
-      pttListening = false;
-      setPttButtonState(false);
-      pttRecognition = null;
-    }
-  }
-  async function refreshVoiceKeywords(reset) {
-    if (appState.voiceKeywordsBusy)
-      return;
-    appState.voiceKeywordsBusy = true;
-    try {
-      const cursor = reset ? null : appState.voiceKeywordsNextCursor;
-      if (!reset && !cursor)
-        return;
-      const result = await fetchVoiceKeywords("", cursor, VOICE_KEYWORD_LIMIT);
-      if (result.error) {
-        setStatus(dom.voiceKeywordStatus, result.error, "error");
-        return;
-      }
-      const items = Array.isArray(result.items) ? result.items : [];
-      if (reset) {
-        appState.voiceKeywords = items;
-      } else {
-        const merged = [...appState.voiceKeywords];
-        for (const item of items) {
-          const index = merged.findIndex((row) => row.phrase === item.phrase);
-          if (index >= 0)
-            merged[index] = item;
-          else
-            merged.push(item);
-        }
-        appState.voiceKeywords = merged;
-      }
-      appState.voiceKeywordsNextCursor = result.nextCursor || null;
-      renderVoiceKeywordList(appState.voiceKeywords, !!appState.voiceKeywordsNextCursor);
-    } finally {
-      appState.voiceKeywordsBusy = false;
-    }
-  }
-  async function onSaveVoiceKeyword(event) {
-    event.preventDefault();
-    const phrase = dom.voiceKeywordPhraseInput.value.trim();
-    const url = dom.voiceKeywordUrlInput.value.trim();
-    if (!phrase) {
-      setStatus(dom.voiceKeywordStatus, "Anna avainsana.", "error");
-      return;
-    }
-    if (!url) {
-      setStatus(dom.voiceKeywordStatus, "Anna YouTube-linkki.", "error");
-      return;
-    }
-    const result = await upsertVoiceKeywordApi(phrase, url);
-    if (result.error) {
-      setStatus(dom.voiceKeywordStatus, result.error, "error");
-      return;
-    }
-    dom.voiceKeywordPhraseInput.value = "";
-    dom.voiceKeywordUrlInput.value = "";
-    setStatus(dom.voiceKeywordStatus, "Avainsana tallennettu.", "ok");
-    showToast("happy", ["Eppu oppi uuden avainsanan."]);
-    await refreshVoiceKeywords(true);
-  }
-  function fillVoiceKeywordForEdit(phrase) {
-    const keyword = appState.voiceKeywords.find((item) => item.phrase === phrase);
-    if (!keyword)
-      return;
-    dom.voiceKeywordPhraseInput.value = keyword.phrase;
-    dom.voiceKeywordUrlInput.value = keyword.url;
-    dom.voiceKeywordPhraseInput.focus();
-  }
-  async function onDeleteVoiceKeyword(phrase) {
-    const result = await deleteVoiceKeywordApi(phrase);
-    if (result.error) {
-      setStatus(dom.voiceKeywordStatus, result.error, "error");
-      return;
-    }
-    appState.voiceKeywords = appState.voiceKeywords.filter((item) => item.phrase !== phrase);
-    renderVoiceKeywordList(appState.voiceKeywords, !!appState.voiceKeywordsNextCursor);
-    setStatus(dom.voiceKeywordStatus, "Avainsana poistettu.", "ok");
-    showToast("stern", ["Eppu unohti avainsanan."]);
-    if (appState.voiceKeywords.length === 0) {
-      await refreshVoiceKeywords(true);
-    }
-  }
-  async function refreshPlaylists(reset) {
-    if (appState.playlistListBusy)
-      return;
-    appState.playlistListBusy = true;
-    try {
-      const cursor = reset ? null : appState.playlistsNextCursor;
-      if (!reset && !cursor)
-        return;
-      const result = await fetchPlaylists(appState.playlistSearchQuery, cursor, PLAYLIST_LIST_LIMIT);
-      if (result.error) {
-        setStatus(dom.playlistStatus, result.error, "error");
-        return;
-      }
-      const received = Array.isArray(result.items) ? result.items : [];
-      if (reset) {
-        appState.playlists = received;
-      } else {
-        const next = [...appState.playlists];
-        for (const item of received) {
-          const idx = next.findIndex((row) => row.id === item.id);
-          if (idx >= 0)
-            next[idx] = item;
-          else
-            next.push(item);
-        }
-        appState.playlists = next;
-      }
-      appState.playlistsNextCursor = result.nextCursor || null;
-      if (appState.selectedPlaylistId && !appState.playlists.some((item) => item.id === appState.selectedPlaylistId)) {
-        appState.selectedPlaylistId = null;
-        appState.selectedPlaylist = null;
-      }
-      if (!appState.selectedPlaylistId && appState.playlists.length > 0) {
-        await selectPlaylist(appState.playlists[0].id);
-        return;
-      }
-      renderPlaylistPanels();
-    } finally {
-      appState.playlistListBusy = false;
-    }
-  }
-  async function refreshSelectedPlaylist(append = false) {
-    const playlistId = appState.selectedPlaylistId;
-    if (!playlistId) {
-      appState.selectedPlaylist = null;
-      renderPlaylistPanels();
-      return;
-    }
-    if (appState.playlistDetailBusy)
-      return;
-    appState.playlistDetailBusy = true;
-    try {
-      const cursor = append ? appState.selectedPlaylist?.songNextCursor || null : null;
-      if (append && !cursor)
-        return;
-      const response = await fetchPlaylistDetail(playlistId, appState.playlistSongSearchQuery, cursor, PLAYLIST_SONG_LIMIT);
-      if (response.error || !response.playlist) {
-        setStatus(dom.playlistStatus, response.error || "Soittolistan lataus epäonnistui", "error");
-        return;
-      }
-      const playlist = response.playlist;
-      if (append && appState.selectedPlaylist && appState.selectedPlaylist.id === playlist.id) {
-        const merged = {
-          ...playlist,
-          songs: [...appState.selectedPlaylist.songs, ...playlist.songs]
-        };
-        appState.selectedPlaylist = merged;
-      } else {
-        appState.selectedPlaylist = playlist;
-      }
-      upsertPlaylistSummary({
-        id: playlist.id,
-        name: playlist.name,
-        createdBy: playlist.createdBy,
-        updatedBy: playlist.updatedBy,
-        createdAt: playlist.createdAt,
-        updatedAt: playlist.updatedAt,
-        songCount: playlist.songCount
-      });
-      renderPlaylistPanels();
-    } finally {
-      appState.playlistDetailBusy = false;
-    }
-  }
-  async function selectPlaylist(playlistId) {
-    if (appState.selectedPlaylistId === playlistId && appState.selectedPlaylist)
-      return;
-    appState.selectedPlaylistId = playlistId;
-    appState.selectedPlaylist = null;
-    appState.playlistSongSearchQuery = "";
-    dom.playlistSongSearchInput.value = "";
-    renderPlaylistPanels();
-    await refreshSelectedPlaylist(false);
   }
   async function onSearchSubmit(event) {
     event.preventDefault();
@@ -1199,156 +692,6 @@
     appState.stateEtag = "";
     fetchState();
   }
-  async function onCreatePlaylist() {
-    const name = window.prompt("Anna uuden soittolistan nimi:")?.trim();
-    if (!name)
-      return;
-    const result = await createPlaylistApi(name);
-    if (result.error || !result.playlist) {
-      setStatus(dom.playlistStatus, result.error || "Soittolistan luonti epäonnistui", "error");
-      return;
-    }
-    setStatus(dom.playlistStatus, `Luotu: ${result.playlist.name}`, "ok");
-    await refreshPlaylists(true);
-    if (result.playlist?.id) {
-      await selectPlaylist(result.playlist.id);
-    }
-  }
-  async function onRenamePlaylist() {
-    const playlist = selectedPlaylistSummary();
-    if (!playlist) {
-      setStatus(dom.playlistStatus, "Valitse ensin soittolista.", "error");
-      return;
-    }
-    const name = window.prompt("Uusi nimi soittolistalle:", playlist.name)?.trim();
-    if (!name)
-      return;
-    const result = await renamePlaylistApi(playlist.id, name);
-    if (result.error || !result.playlist) {
-      setStatus(dom.playlistStatus, result.error || "Nimen vaihto epäonnistui", "error");
-      return;
-    }
-    setStatus(dom.playlistStatus, "Soittolista nimettiin uudelleen", "ok");
-    await refreshPlaylists(true);
-    await selectPlaylist(playlist.id);
-  }
-  async function onDeletePlaylist() {
-    const playlist = selectedPlaylistSummary();
-    if (!playlist) {
-      setStatus(dom.playlistStatus, "Valitse ensin soittolista.", "error");
-      return;
-    }
-    const confirmed = window.confirm(`Poistetaanko soittolista "${playlist.name}"?`);
-    if (!confirmed)
-      return;
-    const result = await deletePlaylistApi(playlist.id);
-    if (result.error) {
-      setStatus(dom.playlistStatus, result.error, "error");
-      return;
-    }
-    setStatus(dom.playlistStatus, "Soittolista poistettu", "ok");
-    if (appState.selectedPlaylistId === playlist.id) {
-      appState.selectedPlaylistId = null;
-      appState.selectedPlaylist = null;
-    }
-    removePlaylistSummary(playlist.id);
-    renderPlaylistPanels();
-    await refreshPlaylists(true);
-  }
-  async function onAddSongToPlaylist(event) {
-    event.preventDefault();
-    const playlistId = requireSelectedPlaylist();
-    if (!playlistId)
-      return;
-    const url = dom.playlistSongUrlInput.value.trim();
-    if (!url)
-      return;
-    const result = await addPlaylistSongApi(playlistId, url);
-    if (result.error) {
-      setStatus(dom.playlistStatus, result.error, "error");
-      return;
-    }
-    dom.playlistSongUrlInput.value = "";
-    setStatus(dom.playlistStatus, "Kappale lisätty soittolistaan", "ok");
-    await refreshSelectedPlaylist(false);
-  }
-  async function onImportYouTubePlaylist(event) {
-    event.preventDefault();
-    const url = dom.playlistImportUrlInput.value.trim();
-    if (!url) {
-      setStatus(dom.playlistStatus, "YouTube-soittolistan URL puuttuu", "error");
-      return;
-    }
-    const name = dom.playlistImportNameInput.value.trim();
-    setStatus(dom.playlistStatus, "Tuodaan YouTube-soittolistaa...");
-    const result = await importYouTubePlaylistApi(name, url);
-    if (result.error || !result.playlist) {
-      setStatus(dom.playlistStatus, result.error || "Tuonti epäonnistui", "error");
-      return;
-    }
-    dom.playlistImportUrlInput.value = "";
-    dom.playlistImportNameInput.value = "";
-    setStatus(dom.playlistStatus, `Tuotu: ${result.playlist.name}`, "ok");
-    await refreshPlaylists(true);
-    await selectPlaylist(result.playlist.id);
-  }
-  async function onPlayPlaylist(shuffle) {
-    const playlistId = requireSelectedPlaylist();
-    if (!playlistId)
-      return;
-    if (!appState.currentGuild) {
-      setStatus(dom.playlistStatus, "Valitse palvelin ennen jonotusta.", "error");
-      return;
-    }
-    const result = await playPlaylistApi(playlistId, appState.currentGuild, shuffle);
-    if (result.error) {
-      setStatus(dom.playlistStatus, result.error, "error");
-      return;
-    }
-    if (result.noop) {
-      setStatus(dom.playlistStatus, result.message || "Soittolista oli tyhjä", "info");
-      return;
-    }
-    setStatus(dom.playlistStatus, `Jonoon lisätty ${result.queued || 0} kappaletta`, "ok");
-    appState.stateEtag = "";
-    fetchState();
-  }
-  async function onSaveWholeQueueToPlaylist() {
-    const playlistId = requireSelectedPlaylist();
-    if (!playlistId)
-      return;
-    if (!appState.currentGuild) {
-      setStatus(dom.playlistStatus, "Valitse palvelin ennen tallennusta.", "error");
-      return;
-    }
-    const result = await copyQueueToPlaylistApi(playlistId, appState.currentGuild, true);
-    if (result.error || !result.result) {
-      setStatus(dom.playlistStatus, result.error || "Jonon tallennus epäonnistui", "error");
-      return;
-    }
-    setStatus(dom.playlistStatus, `Tallennettu: +${result.result.added}, duplikaatit ${result.result.skippedDuplicates}, virheet ${result.result.failed}`, "ok");
-    await refreshSelectedPlaylist(false);
-    await refreshPlaylists(true);
-  }
-  async function onCreatePlaylistFromQueue() {
-    if (!appState.currentGuild) {
-      setStatus(dom.playlistStatus, "Valitse palvelin ennen tallennusta.", "error");
-      return;
-    }
-    const name = window.prompt("Anna nimi uudelle soittolistalle (jonosta):")?.trim();
-    if (!name)
-      return;
-    const result = await createPlaylistFromQueueApi(appState.currentGuild, name, true);
-    if (result.error || !result.playlist) {
-      setStatus(dom.playlistStatus, result.error || "Soittolistan luonti jonosta epäonnistui", "error");
-      return;
-    }
-    setStatus(dom.playlistStatus, `Soittolista luotu jonosta: +${result.result?.added || 0}`, "ok");
-    await refreshPlaylists(true);
-    if (result.playlist?.id) {
-      await selectPlaylist(result.playlist.id);
-    }
-  }
   function queueSelectionItems() {
     const guildState = currentGuildState();
     const items = [];
@@ -1382,73 +725,12 @@
     const rendered = items.map((item) => ({ ...item, checked: queueSelectionKeys.has(item.key) }));
     renderQueueSelectionList(rendered);
   }
-  function openQueueSelectionModal() {
-    appState.queueSelectModalOpen = true;
-    queueSelectionKeys = new Set;
-    renderQueueSelectionModal();
-    setVisible(dom.queueSelectModal, true);
-    document.body.classList.add("modal-open");
-  }
   function closeQueueSelectionModal() {
     appState.queueSelectModalOpen = false;
     setVisible(dom.queueSelectModal, false);
     setVisible(dom.queueSelectStatus, false);
     dom.queueSelectStatus.textContent = "";
     document.body.classList.remove("modal-open");
-  }
-  async function onSaveSelectedQueueToPlaylist() {
-    const playlistId = requireSelectedPlaylist();
-    if (!playlistId)
-      return;
-    if (!appState.currentGuild) {
-      setStatus(dom.playlistStatus, "Valitse palvelin ennen tallennusta.", "error");
-      return;
-    }
-    openQueueSelectionModal();
-  }
-  async function onConfirmQueueSelectionSave() {
-    const playlistId = requireSelectedPlaylist();
-    if (!playlistId || !appState.currentGuild)
-      return;
-    const includeCurrent = queueSelectionKeys.has("current");
-    const selectedIndices = [...queueSelectionKeys].filter((key) => key.startsWith("queue:")).map((key) => Number.parseInt(key.split(":")[1], 10)).filter((value) => !Number.isNaN(value)).sort((a, b) => a - b);
-    if (!includeCurrent && selectedIndices.length === 0) {
-      setStatus(dom.queueSelectStatus, "Valitse vähintään yksi kappale.", "error");
-      return;
-    }
-    const result = await copyQueueToPlaylistApi(playlistId, appState.currentGuild, includeCurrent, selectedIndices);
-    if (result.error || !result.result) {
-      setStatus(dom.queueSelectStatus, result.error || "Valinnan tallennus epäonnistui", "error");
-      return;
-    }
-    closeQueueSelectionModal();
-    setStatus(dom.playlistStatus, `Tallennettu valinta: +${result.result.added}, duplikaatit ${result.result.skippedDuplicates}, virheet ${result.result.failed}`, "ok");
-    await refreshSelectedPlaylist(false);
-    await refreshPlaylists(true);
-  }
-  async function onRemovePlaylistSong(songId) {
-    const playlistId = requireSelectedPlaylist();
-    if (!playlistId)
-      return;
-    const result = await removePlaylistSongApi(playlistId, songId);
-    if (result.error) {
-      setStatus(dom.playlistStatus, result.error, "error");
-      return;
-    }
-    setStatus(dom.playlistStatus, "Kappale poistettu soittolistasta", "ok");
-    await refreshSelectedPlaylist(false);
-    await refreshPlaylists(true);
-  }
-  async function onMovePlaylistSong(fromIndex, toIndex) {
-    const playlistId = requireSelectedPlaylist();
-    if (!playlistId || fromIndex === toIndex)
-      return;
-    const result = await movePlaylistSongApi(playlistId, fromIndex, toIndex);
-    if (result.error) {
-      setStatus(dom.playlistStatus, result.error, "error");
-      return;
-    }
-    await refreshSelectedPlaylist(false);
   }
   function attachQueueEvents() {
     dom.queueList.addEventListener("click", (event) => {
@@ -1492,130 +774,6 @@
       appState.dragFromIndex = null;
     });
   }
-  function attachPlaylistEvents() {
-    dom.createPlaylistBtn.addEventListener("click", () => {
-      onCreatePlaylist();
-    });
-    dom.renamePlaylistBtn.addEventListener("click", () => {
-      onRenamePlaylist();
-    });
-    dom.deletePlaylistBtn.addEventListener("click", () => {
-      onDeletePlaylist();
-    });
-    dom.playPlaylistBtn.addEventListener("click", () => {
-      onPlayPlaylist(false);
-    });
-    dom.playPlaylistShuffleBtn.addEventListener("click", () => {
-      onPlayPlaylist(true);
-    });
-    dom.saveQueueToPlaylistBtn.addEventListener("click", () => {
-      onSaveWholeQueueToPlaylist();
-    });
-    dom.saveSelectedQueueBtn.addEventListener("click", () => {
-      onSaveSelectedQueueToPlaylist();
-    });
-    dom.createPlaylistFromQueueBtn.addEventListener("click", () => {
-      onCreatePlaylistFromQueue();
-    });
-    dom.playlistSongForm.addEventListener("submit", (event) => {
-      onAddSongToPlaylist(event);
-    });
-    dom.playlistImportForm.addEventListener("submit", (event) => {
-      onImportYouTubePlaylist(event);
-    });
-    dom.playlistLoadMoreBtn.addEventListener("click", () => {
-      refreshPlaylists(false);
-    });
-    dom.playlistSongsLoadMoreBtn.addEventListener("click", () => {
-      refreshSelectedPlaylist(true);
-    });
-    dom.playlistSearchInput.addEventListener("input", () => {
-      appState.playlistSearchQuery = dom.playlistSearchInput.value.trim();
-      if (playlistSearchDebounce)
-        window.clearTimeout(playlistSearchDebounce);
-      playlistSearchDebounce = window.setTimeout(() => {
-        refreshPlaylists(true);
-      }, 250);
-    });
-    dom.playlistSongSearchInput.addEventListener("input", () => {
-      appState.playlistSongSearchQuery = dom.playlistSongSearchInput.value.trim();
-      if (playlistSongSearchDebounce)
-        window.clearTimeout(playlistSongSearchDebounce);
-      playlistSongSearchDebounce = window.setTimeout(() => {
-        refreshSelectedPlaylist(false);
-      }, 250);
-    });
-    dom.playlistList.addEventListener("click", (event) => {
-      const target = event.target;
-      const button = target.closest("[data-playlist-id]");
-      if (!button)
-        return;
-      const playlistId = button.getAttribute("data-playlist-id");
-      if (!playlistId)
-        return;
-      selectPlaylist(playlistId);
-    });
-    dom.playlistSongList.addEventListener("click", (event) => {
-      const target = event.target;
-      const button = target.closest("[data-playlist-remove-song]");
-      if (!button)
-        return;
-      const songId = button.getAttribute("data-playlist-remove-song");
-      if (!songId)
-        return;
-      onRemovePlaylistSong(songId);
-    });
-    dom.playlistSongList.addEventListener("dragstart", (event) => {
-      const target = event.target;
-      const item = target.closest(".playlist-song-item");
-      if (!item)
-        return;
-      appState.playlistSongDragFromIndex = Number.parseInt(item.getAttribute("data-playlist-song-index") || "", 10);
-      item.classList.add("dragging");
-    });
-    dom.playlistSongList.addEventListener("dragend", (event) => {
-      const target = event.target;
-      const item = target.closest(".playlist-song-item");
-      if (item)
-        item.classList.remove("dragging");
-      appState.playlistSongDragFromIndex = null;
-    });
-    dom.playlistSongList.addEventListener("dragover", (event) => {
-      event.preventDefault();
-    });
-    dom.playlistSongList.addEventListener("drop", (event) => {
-      event.preventDefault();
-      const target = event.target;
-      const item = target.closest(".playlist-song-item");
-      if (!item || appState.playlistSongDragFromIndex === null)
-        return;
-      const to = Number.parseInt(item.getAttribute("data-playlist-song-index") || "", 10);
-      if (!Number.isNaN(to)) {
-        onMovePlaylistSong(appState.playlistSongDragFromIndex, to);
-      }
-      appState.playlistSongDragFromIndex = null;
-    });
-    dom.queueSelectList.addEventListener("change", (event) => {
-      const target = event.target;
-      const key = target.getAttribute("data-queue-select");
-      if (!key)
-        return;
-      if (target.checked)
-        queueSelectionKeys.add(key);
-      else
-        queueSelectionKeys.delete(key);
-    });
-    dom.queueSelectConfirmBtn.addEventListener("click", () => {
-      onConfirmQueueSelectionSave();
-    });
-    dom.closeQueueSelectBtn.addEventListener("click", closeQueueSelectionModal);
-    dom.queueSelectModal.addEventListener("click", (event) => {
-      const target = event.target;
-      if (target.closest('[data-modal-close="queue-select"]')) {
-        closeQueueSelectionModal();
-      }
-    });
-  }
   function bindEvents() {
     dom.searchForm.addEventListener("submit", (event) => {
       onSearchSubmit(event);
@@ -1628,44 +786,6 @@
     });
     dom.skipBtn.addEventListener("click", () => {
       onSkip();
-    });
-    setPttButtonState(false);
-    dom.pttBtn.addEventListener("pointerdown", (event) => {
-      event.preventDefault();
-      startPttCapture();
-    });
-    dom.pttBtn.addEventListener("pointerup", (event) => {
-      event.preventDefault();
-      stopPttCapture();
-    });
-    dom.pttBtn.addEventListener("pointerleave", () => {
-      stopPttCapture();
-    });
-    dom.pttBtn.addEventListener("pointercancel", () => {
-      stopPttCapture();
-    });
-    dom.voiceKeywordForm.addEventListener("submit", (event) => {
-      onSaveVoiceKeyword(event);
-    });
-    dom.voiceKeywordLoadMoreBtn.addEventListener("click", () => {
-      refreshVoiceKeywords(false);
-    });
-    dom.voiceKeywordList.addEventListener("click", (event) => {
-      const target = event.target;
-      const editButton = target.closest("[data-voice-keyword-use]");
-      if (editButton) {
-        const phrase = editButton.getAttribute("data-voice-keyword-use");
-        if (phrase)
-          fillVoiceKeywordForEdit(phrase);
-        return;
-      }
-      const deleteButton = target.closest("[data-voice-keyword-delete]");
-      if (deleteButton) {
-        const phrase = deleteButton.getAttribute("data-voice-keyword-delete");
-        if (phrase) {
-          onDeleteVoiceKeyword(phrase);
-        }
-      }
     });
     dom.searchResults.addEventListener("click", (event) => {
       const target = event.target;
@@ -1699,7 +819,6 @@
       schedulePoll(200);
     });
     attachQueueEvents();
-    attachPlaylistEvents();
   }
   async function bootstrap() {
     enableLowPowerModeIfNeeded();

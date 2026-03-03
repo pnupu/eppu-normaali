@@ -8,6 +8,20 @@ function byId<T extends HTMLElement>(id: string): T {
   return el as T;
 }
 
+function byIdOptional<T extends HTMLElement>(
+  id: string,
+  tagName: keyof HTMLElementTagNameMap = 'div'
+): T {
+  const el = document.getElementById(id);
+  if (el) {
+    return el as T;
+  }
+  const stub = document.createElement(tagName);
+  stub.id = id;
+  stub.classList.add('hidden');
+  return stub as T;
+}
+
 export const dom = {
   mainSection: byId<HTMLElement>('mainSection'),
   loginSection: byId<HTMLElement>('loginSection'),
@@ -28,44 +42,44 @@ export const dom = {
   nowPlayingMeta: byId<HTMLElement>('nowPlayingMeta'),
   searchInput: byId<HTMLInputElement>('searchInput'),
   searchResults: byId<HTMLElement>('searchResults'),
-  pttBtn: byId<HTMLButtonElement>('pttBtn'),
-  voiceDebugTranscript: byId<HTMLElement>('voiceDebugTranscript'),
-  voiceStatus: byId<HTMLElement>('voiceStatus'),
-  voiceKeywordForm: byId<HTMLFormElement>('voiceKeywordForm'),
-  voiceKeywordPhraseInput: byId<HTMLInputElement>('voiceKeywordPhraseInput'),
-  voiceKeywordUrlInput: byId<HTMLInputElement>('voiceKeywordUrlInput'),
-  voiceKeywordList: byId<HTMLElement>('voiceKeywordList'),
-  voiceKeywordLoadMoreBtn: byId<HTMLButtonElement>('voiceKeywordLoadMoreBtn'),
-  voiceKeywordStatus: byId<HTMLElement>('voiceKeywordStatus'),
+  pttBtn: byIdOptional<HTMLButtonElement>('pttBtn', 'button'),
+  voiceDebugTranscript: byIdOptional<HTMLElement>('voiceDebugTranscript', 'p'),
+  voiceStatus: byIdOptional<HTMLElement>('voiceStatus', 'p'),
+  voiceKeywordForm: byIdOptional<HTMLFormElement>('voiceKeywordForm', 'form'),
+  voiceKeywordPhraseInput: byIdOptional<HTMLInputElement>('voiceKeywordPhraseInput', 'input'),
+  voiceKeywordUrlInput: byIdOptional<HTMLInputElement>('voiceKeywordUrlInput', 'input'),
+  voiceKeywordList: byIdOptional<HTMLElement>('voiceKeywordList'),
+  voiceKeywordLoadMoreBtn: byIdOptional<HTMLButtonElement>('voiceKeywordLoadMoreBtn', 'button'),
+  voiceKeywordStatus: byIdOptional<HTMLElement>('voiceKeywordStatus', 'p'),
   userInfo: byId<HTMLElement>('userInfo'),
   toastStack: byId<HTMLElement>('toastStack'),
   urlInput: byId<HTMLInputElement>('urlInput'),
-  playlistList: byId<HTMLElement>('playlistList'),
-  playlistLoadMoreBtn: byId<HTMLButtonElement>('playlistLoadMoreBtn'),
-  playlistSearchInput: byId<HTMLInputElement>('playlistSearchInput'),
-  createPlaylistBtn: byId<HTMLButtonElement>('createPlaylistBtn'),
-  playlistTitle: byId<HTMLElement>('playlistTitle'),
-  renamePlaylistBtn: byId<HTMLButtonElement>('renamePlaylistBtn'),
-  deletePlaylistBtn: byId<HTMLButtonElement>('deletePlaylistBtn'),
-  playPlaylistBtn: byId<HTMLButtonElement>('playPlaylistBtn'),
-  playPlaylistShuffleBtn: byId<HTMLButtonElement>('playPlaylistShuffleBtn'),
-  playlistSongForm: byId<HTMLFormElement>('playlistSongForm'),
-  playlistSongUrlInput: byId<HTMLInputElement>('playlistSongUrlInput'),
-  playlistSongList: byId<HTMLElement>('playlistSongList'),
-  playlistSongSearchInput: byId<HTMLInputElement>('playlistSongSearchInput'),
-  playlistSongsLoadMoreBtn: byId<HTMLButtonElement>('playlistSongsLoadMoreBtn'),
-  playlistStatus: byId<HTMLElement>('playlistStatus'),
-  saveQueueToPlaylistBtn: byId<HTMLButtonElement>('saveQueueToPlaylistBtn'),
-  saveSelectedQueueBtn: byId<HTMLButtonElement>('saveSelectedQueueBtn'),
-  createPlaylistFromQueueBtn: byId<HTMLButtonElement>('createPlaylistFromQueueBtn'),
-  playlistImportForm: byId<HTMLFormElement>('playlistImportForm'),
-  playlistImportNameInput: byId<HTMLInputElement>('playlistImportNameInput'),
-  playlistImportUrlInput: byId<HTMLInputElement>('playlistImportUrlInput'),
-  queueSelectModal: byId<HTMLElement>('queueSelectModal'),
-  closeQueueSelectBtn: byId<HTMLButtonElement>('closeQueueSelectBtn'),
-  queueSelectList: byId<HTMLElement>('queueSelectList'),
-  queueSelectStatus: byId<HTMLElement>('queueSelectStatus'),
-  queueSelectConfirmBtn: byId<HTMLButtonElement>('queueSelectConfirmBtn'),
+  playlistList: byIdOptional<HTMLElement>('playlistList'),
+  playlistLoadMoreBtn: byIdOptional<HTMLButtonElement>('playlistLoadMoreBtn', 'button'),
+  playlistSearchInput: byIdOptional<HTMLInputElement>('playlistSearchInput', 'input'),
+  createPlaylistBtn: byIdOptional<HTMLButtonElement>('createPlaylistBtn', 'button'),
+  playlistTitle: byIdOptional<HTMLElement>('playlistTitle', 'h3'),
+  renamePlaylistBtn: byIdOptional<HTMLButtonElement>('renamePlaylistBtn', 'button'),
+  deletePlaylistBtn: byIdOptional<HTMLButtonElement>('deletePlaylistBtn', 'button'),
+  playPlaylistBtn: byIdOptional<HTMLButtonElement>('playPlaylistBtn', 'button'),
+  playPlaylistShuffleBtn: byIdOptional<HTMLButtonElement>('playPlaylistShuffleBtn', 'button'),
+  playlistSongForm: byIdOptional<HTMLFormElement>('playlistSongForm', 'form'),
+  playlistSongUrlInput: byIdOptional<HTMLInputElement>('playlistSongUrlInput', 'input'),
+  playlistSongList: byIdOptional<HTMLElement>('playlistSongList'),
+  playlistSongSearchInput: byIdOptional<HTMLInputElement>('playlistSongSearchInput', 'input'),
+  playlistSongsLoadMoreBtn: byIdOptional<HTMLButtonElement>('playlistSongsLoadMoreBtn', 'button'),
+  playlistStatus: byIdOptional<HTMLElement>('playlistStatus', 'p'),
+  saveQueueToPlaylistBtn: byIdOptional<HTMLButtonElement>('saveQueueToPlaylistBtn', 'button'),
+  saveSelectedQueueBtn: byIdOptional<HTMLButtonElement>('saveSelectedQueueBtn', 'button'),
+  createPlaylistFromQueueBtn: byIdOptional<HTMLButtonElement>('createPlaylistFromQueueBtn', 'button'),
+  playlistImportForm: byIdOptional<HTMLFormElement>('playlistImportForm', 'form'),
+  playlistImportNameInput: byIdOptional<HTMLInputElement>('playlistImportNameInput', 'input'),
+  playlistImportUrlInput: byIdOptional<HTMLInputElement>('playlistImportUrlInput', 'input'),
+  queueSelectModal: byIdOptional<HTMLElement>('queueSelectModal'),
+  closeQueueSelectBtn: byIdOptional<HTMLButtonElement>('closeQueueSelectBtn', 'button'),
+  queueSelectList: byIdOptional<HTMLElement>('queueSelectList'),
+  queueSelectStatus: byIdOptional<HTMLElement>('queueSelectStatus', 'p'),
+  queueSelectConfirmBtn: byIdOptional<HTMLButtonElement>('queueSelectConfirmBtn', 'button'),
 };
 
 export function setVisible(el: HTMLElement, visible: boolean): void {

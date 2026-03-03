@@ -201,12 +201,12 @@ function showMain(): void {
   setVisible(dom.loginSection, false);
   setVisible(dom.mainSection, true);
   renderPlaybackState({});
-  renderPlaylistPanels();
+  // renderPlaylistPanels();
   setPollBadge('ready');
   void fetchMe();
   void fetchState();
-  void refreshPlaylists(true);
-  void refreshVoiceKeywords(true);
+  // void refreshPlaylists(true);
+  // void refreshVoiceKeywords(true);
 }
 
 function requireGuildBeforeQueue(statusEl: HTMLElement): boolean {
@@ -1071,6 +1071,7 @@ function bindEvents(): void {
   dom.skipBtn.addEventListener('click', () => {
     void onSkip();
   });
+  /*
   setPttButtonState(false);
   dom.pttBtn.addEventListener('pointerdown', (event) => {
     event.preventDefault();
@@ -1108,6 +1109,7 @@ function bindEvents(): void {
       }
     }
   });
+  */
 
   dom.searchResults.addEventListener('click', (event) => {
     const target = event.target as HTMLElement;
@@ -1146,7 +1148,7 @@ function bindEvents(): void {
   });
 
   attachQueueEvents();
-  attachPlaylistEvents();
+  // attachPlaylistEvents();
 }
 
 async function bootstrap(): Promise<void> {
