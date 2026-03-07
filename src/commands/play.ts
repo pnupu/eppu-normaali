@@ -311,6 +311,81 @@ function isYtCookieAuthErrorText(text: string): boolean {
     || value.includes('sign in to confirm you\u2019re not a bot')
     || value.includes('use --cookies-from-browser or --cookies for the authentication');
 }
+function isYtExtractionChallengeErrorText(text: string): boolean {
+  const value = text.toLowerCase();
+  return value.includes('n challenge solving failed')
+    || value.includes('signature solving failed')
+    || value.includes('js challenge provider')
+    || value.includes('only images are available')
+    || value.includes('requested format is not available')
+    || value.includes('some formats may be missing');
+}
+function isYouTubeUrlLike(input: string): boolean {
+  const value = input.toLowerCase();
+  return value.includes('youtube.com/') || value.includes('youtu.be/');
+}
+function normalizeAndroidFallbackFormat(format?: string): string | null {
+  if (!format) return null;
+  const trimmed = format.trim();
+  if (!trimmed) return null;
+  if (trimmed.includes('bestaudio')) {
+    return '18/best';
+  }
+  return trimmed;
+}
+function buildAndroidFallbackJsonArgs(input: string, baseFlags: Flags): string[] {
+  const args: string[] = [
+    '--extractor-args', 'youtube:player_client=android',
+    '--no-warnings',
+    '--no-progress',
+  ];
+  if (baseFlags.dumpSingleJson) args.push('--dump-single-json');
+  if (baseFlags.simulate) args.push('--simulate');
+  if (baseFlags.flatPlaylist) args.push('--flat-playlist');
+  const fallbackFormat = normalizeAndroidFallbackFormat(typeof baseFlags.format === 'string' ? baseFlags.format : undefined);
+  if (fallbackFormat) {
+    args.push('-f', fallbackFormat);
+  }
+  args.push(input);
+  return args;
+}
+async function runYtDlpJsonViaSpawn<T>(args: string[], context: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const proc = spawn(YTDLP_BIN, args);
+    let stdout = '';
+    let stderr = '';
+    proc.stdout.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+    proc.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+      if (stderr.length > 8192) stderr = stderr.slice(-8192);
+    });
+    proc.on('error', (error) => {
+      reject(error);
+    });
+    proc.on('exit', (code) => {
+      if (code !== 0) {
+        reject({
+          exitCode: code,
+          message: `yt-dlp spawn failed in ${context}`,
+          stderr: stderr.trim() || undefined,
+          stdout: stdout.trim() || undefined,
+        });
+        return;
+      }
+      try {
+        resolve(JSON.parse(stdout) as T);
+      } catch (error) {
+        reject({
+          message: `yt-dlp JSON parse failed in ${context}: ${(error as Error).message}`,
+          stderr: stderr.trim() || undefined,
+          stdout: stdout.trim() || undefined,
+        });
+      }
+    });
+  });
+}
 function isYtCookieAuthError(error: unknown): boolean {
   const text = formatYtDlpError(error);
   return isYtCookieAuthErrorText(text);
@@ -383,28 +458,40 @@ async function runYtDlpJsonWithAutoCookieRefresh<T>(
   baseFlags: Flags,
   context: string
 ): Promise<T> {
+  let lastError: unknown;
   try {
     return await youtubeDl(input, buildYtDlpFlags(baseFlags)) as unknown as T;
   } catch (error) {
+    lastError = error;
     const runtime = getYtDlpRuntimeOptions();
-    if (!runtime.cookiesFromBrowser || !isYtCookieAuthError(error)) {
-      throw error;
-    }
-    console.warn(`[yt-cookie] Auth challenge in ${context}, refreshing cookies and retrying once`);
-    const refreshed = await refreshYtCookiesFromBrowser(`auth-error:${context}`, input);
-    if (!refreshed) {
-      throw error;
-    }
-    try {
-      return await youtubeDl(input, buildYtDlpFlags(baseFlags, 'file')) as unknown as T;
-    } catch (retryError) {
-      if (isYtCookieAuthError(retryError) && runtime.cookiesFromBrowser) {
-        console.warn(`[yt-cookie] File retry failed in ${context}, retrying once with browser cookies`);
-        return await youtubeDl(input, buildYtDlpFlags(baseFlags, 'browser')) as unknown as T;
+    const formattedError = formatYtDlpError(error);
+    const shouldRefreshCookies = runtime.cookiesFromBrowser
+      && (isYtCookieAuthError(error) || isYtExtractionChallengeErrorText(formattedError));
+    if (shouldRefreshCookies) {
+      console.warn(`[yt-cookie] Refresh-triggering extraction error in ${context}, refreshing cookies and retrying once`);
+      const refreshed = await refreshYtCookiesFromBrowser(`extractor-error:${context}`, input);
+      if (refreshed) {
+        try {
+          return await youtubeDl(input, buildYtDlpFlags(baseFlags, 'file')) as unknown as T;
+        } catch (retryError) {
+          lastError = retryError;
+          if (isYtCookieAuthError(retryError) && runtime.cookiesFromBrowser) {
+            console.warn(`[yt-cookie] File retry failed in ${context}, retrying once with browser cookies`);
+            try {
+              return await youtubeDl(input, buildYtDlpFlags(baseFlags, 'browser')) as unknown as T;
+            } catch (browserRetryError) {
+              lastError = browserRetryError;
+            }
+          }
+        }
       }
-      throw retryError;
     }
   }
+  if (isYouTubeUrlLike(input) && isYtExtractionChallengeErrorText(formatYtDlpError(lastError))) {
+    console.warn(`[yt-dlp] ${context} retrying with android no-cookie fallback`);
+    return await runYtDlpJsonViaSpawn<T>(buildAndroidFallbackJsonArgs(input, baseFlags), `${context} android-fallback`);
+  }
+  throw lastError;
 }
 function beginStartupTrace(message: Message, title: string, url: string, source: StartupSource): StartupTrace | null {
   if (!startupDebugEnabled()) return null;
@@ -1592,120 +1679,181 @@ function createFfmpegStream(url: string): Readable {
   return stdout;
 }
 function createYouTubeStream(youtubeUrl: string): Readable {
-  // Pipe yt-dlp audio output directly into FFmpeg to avoid URL expiry/403 issues
-  console.log('Piping yt-dlp -> ffmpeg for:', youtubeUrl);
-  const ytdlp = spawn(YTDLP_BIN, buildYtDlpSpawnArgs([
-    '-f', 'bestaudio',
-    '-o', '-',
-    '--quiet',
-    '--no-warnings',
-    '--no-progress',
-    youtubeUrl
-  ]));
-  const ffmpeg = spawn('ffmpeg', [
-    // Pace decode in real-time to avoid burst-decoding entire tracks into memory.
-    // This reduces large initial CPU/memory spikes that can surface as playback hiccups.
-    '-re',
-    '-i', 'pipe:0',
-    '-analyzeduration', '0',
-    '-probesize', '32768',
-    '-loglevel', ffmpegLogLevel(),
-    '-f', 's16le',
-    '-ar', '48000',
-    '-ac', '2',
-    '-acodec', 'pcm_s16le',
-    '-bufsize', '64k',
-    'pipe:1'
-  ]);
-  let ytdlpStdoutBytes = 0;
-  ytdlp.stdout.on('data', (chunk: Buffer) => {
-    ytdlpStdoutBytes += chunk.length;
-  });
-  ytdlp.stdout.pipe(ffmpeg.stdin, { end: true });
-  ffmpeg.stdin.on('error', (error) => {
-    logStreamIssue('FFmpeg stdin error', error);
-  });
-  let ytdlpExited = false;
-  let ffmpegExited = false;
-  let sawCookieAuthError = false;
-  const ytdlpStatsEnabled = ffmpegVerboseLogsEnabled();
-  const ytdlpStatsIntervalMs = ffmpegStatsIntervalMs();
-  let ytdlpLastStatsBytes = 0;
-  let ytdlpStatsTimer: ReturnType<typeof setInterval> | null = null;
-  if (ytdlpStatsEnabled) {
-    const ytdlpStartedAt = Date.now();
-    ytdlpStatsTimer = setInterval(() => {
-      const delta = ytdlpStdoutBytes - ytdlpLastStatsBytes;
-      ytdlpLastStatsBytes = ytdlpStdoutBytes;
-      const rateBps = Math.round(delta / (ytdlpStatsIntervalMs / 1000));
-      console.log(
-        `[yt-dlp][stream] +${Date.now() - ytdlpStartedAt}ms stats bytes=${ytdlpStdoutBytes} rateBps=${rateBps}`
-      );
-    }, ytdlpStatsIntervalMs);
-  }
-  ytdlp.stderr.on('data', (data) => {
-    const line = data.toString().trim();
-    if (!line) return;
-    if (isYtCookieAuthErrorText(line)) {
-      sawCookieAuthError = true;
+  const passthrough = new PassThrough();
+  let settled = false;
+  let startedFallback = false;
+
+  const finishWithError = (error: Error) => {
+    if (settled) return;
+    settled = true;
+    passthrough.destroy(error);
+  };
+  const finishSuccess = () => {
+    if (settled) return;
+    settled = true;
+    passthrough.end();
+  };
+
+  const startAttempt = (mode: 'default' | 'android-fallback') => {
+    const usingFallback = mode === 'android-fallback';
+    const ytdlpArgs = usingFallback
+      ? [
+          '--extractor-args', 'youtube:player_client=android',
+          '-f', '18/best',
+          '-o', '-',
+          '--quiet',
+          '--no-warnings',
+          '--no-progress',
+          youtubeUrl,
+        ]
+      : buildYtDlpSpawnArgs([
+          '-f', 'bestaudio',
+          '-o', '-',
+          '--quiet',
+          '--no-warnings',
+          '--no-progress',
+          youtubeUrl,
+        ]);
+    console.log(
+      usingFallback
+        ? `Piping yt-dlp -> ffmpeg with android fallback for: ${youtubeUrl}`
+        : `Piping yt-dlp -> ffmpeg for: ${youtubeUrl}`
+    );
+    const ytdlp = spawn(YTDLP_BIN, ytdlpArgs);
+    const ffmpeg = spawn('ffmpeg', [
+      '-re',
+      '-i', 'pipe:0',
+      '-analyzeduration', '0',
+      '-probesize', '32768',
+      '-loglevel', ffmpegLogLevel(),
+      '-f', 's16le',
+      '-ar', '48000',
+      '-ac', '2',
+      '-acodec', 'pcm_s16le',
+      '-bufsize', '64k',
+      'pipe:1'
+    ]);
+    let ytdlpStdoutBytes = 0;
+    let ffmpegProducedOutput = false;
+    let ytdlpExited = false;
+    let ffmpegExited = false;
+    let sawCookieAuthError = false;
+    let sawChallengeError = false;
+    let stderrText = '';
+    const ytdlpStatsEnabled = ffmpegVerboseLogsEnabled();
+    const ytdlpStatsIntervalMs = ffmpegStatsIntervalMs();
+    let ytdlpLastStatsBytes = 0;
+    let ytdlpStatsTimer: ReturnType<typeof setInterval> | null = null;
+
+    ytdlp.stdout.on('data', (chunk: Buffer) => {
+      ytdlpStdoutBytes += chunk.length;
+    });
+    ytdlp.stdout.pipe(ffmpeg.stdin, { end: true });
+    ffmpeg.stdin.on('error', (error) => {
+      logStreamIssue('FFmpeg stdin error', error);
+    });
+    if (ytdlpStatsEnabled) {
+      const ytdlpStartedAt = Date.now();
+      ytdlpStatsTimer = setInterval(() => {
+        const delta = ytdlpStdoutBytes - ytdlpLastStatsBytes;
+        ytdlpLastStatsBytes = ytdlpStdoutBytes;
+        const rateBps = Math.round(delta / (ytdlpStatsIntervalMs / 1000));
+        console.log(
+          `[yt-dlp][stream:${mode}] +${Date.now() - ytdlpStartedAt}ms stats bytes=${ytdlpStdoutBytes} rateBps=${rateBps}`
+        );
+      }, ytdlpStatsIntervalMs);
     }
-    const lowered = line.toLowerCase();
-    if (ytdlpVerboseLogsEnabled()) {
-      console.log('yt-dlp:', line);
-      return;
-    }
-    if (lowered.includes('error') || lowered.includes('warning')) {
-      console.warn('yt-dlp:', line);
-    }
-  });
-  ytdlp.on('error', error => {
-    console.error('yt-dlp process error:', error);
-  });
-  ytdlp.on('exit', (code) => {
-    if (ytdlpStatsTimer) {
-      clearInterval(ytdlpStatsTimer);
-      ytdlpStatsTimer = null;
-    }
-    ytdlpExited = true;
-    if (code !== 0) console.log(`yt-dlp exited with code ${code}`);
-    if (code !== 0 && !ffmpegExited) {
-      if (sawCookieAuthError) {
-        void refreshYtCookiesFromBrowser('stream-auth-error', youtubeUrl);
+    ytdlp.stderr.on('data', (data) => {
+      const line = data.toString().trim();
+      if (!line) return;
+      stderrText += `${line}\n`;
+      if (stderrText.length > 8192) stderrText = stderrText.slice(-8192);
+      if (isYtCookieAuthErrorText(line)) {
+        sawCookieAuthError = true;
+      }
+      if (isYtExtractionChallengeErrorText(line)) {
+        sawChallengeError = true;
+      }
+      const lowered = line.toLowerCase();
+      if (ytdlpVerboseLogsEnabled()) {
+        console.log(`yt-dlp[${mode}]:`, line);
         return;
       }
-      if (ytdlpStdoutBytes === 0) {
-        console.warn(`[yt-cookie] stream exited with code=${code} and no audio bytes, forcing cookie refresh`);
-        void refreshYtCookiesFromBrowser('stream-zero-bytes-exit', youtubeUrl);
+      if (lowered.includes('error') || lowered.includes('warning')) {
+        console.warn(`yt-dlp[${mode}]:`, line);
       }
-    }
-  });
-  ffmpeg.on('error', error => {
-    console.error('FFmpeg process error:', error);
-  });
-  ffmpeg.on('exit', (code) => {
-    ffmpegExited = true;
-    if (code !== 0) console.log(`FFmpeg exited with code ${code}`);
-    if (ytdlpStatsTimer) {
-      clearInterval(ytdlpStatsTimer);
-      ytdlpStatsTimer = null;
-    }
-  });
-  wireFfmpegDiagnostics(ffmpeg, `yt-pipe:${youtubeUrl}`);
-  ffmpeg.stdout.on('error', error => {
-    logStreamIssue('FFmpeg stdout error', error);
-  });
-  // Clean up: if FFmpeg dies first, stop yt-dlp.
-  // Do not call ffmpeg.stdin.end() on yt-dlp exit: stdout is already piped
-  // with { end: true }, and ending stdin early can truncate trailing audio.
-  ffmpeg.on('exit', () => {
-    if (!ytdlpExited && ytdlp.exitCode === null) {
-      ytdlp.kill();
-    }
-  });
-  // Pipe through a PassThrough stream so that buffered PCM data survives
-  // after FFmpeg exits (Node.js destroys child process stdio on exit)
-  const passthrough = new PassThrough();
-  ffmpeg.stdout.pipe(passthrough);
+    });
+    ytdlp.on('error', error => {
+      console.error(`yt-dlp process error [${mode}]:`, error);
+    });
+    ffmpeg.on('error', error => {
+      console.error(`FFmpeg process error [${mode}]:`, error);
+    });
+    wireFfmpegDiagnostics(ffmpeg, `yt-pipe:${mode}:${youtubeUrl}`);
+    ffmpeg.stdout.on('data', () => {
+      ffmpegProducedOutput = true;
+    });
+    ffmpeg.stdout.on('error', error => {
+      logStreamIssue('FFmpeg stdout error', error);
+    });
+    ffmpeg.stdout.pipe(passthrough, { end: false });
+
+    const maybeStartFallback = () => {
+      if (settled || usingFallback || startedFallback) return false;
+      startedFallback = true;
+      console.warn(`[yt-dlp] Stream fallback engaged for ${youtubeUrl}`);
+      if (!ffmpegExited && ffmpeg.exitCode === null) {
+        ffmpeg.kill();
+      }
+      startAttempt('android-fallback');
+      return true;
+    };
+
+    ytdlp.on('exit', (code) => {
+      if (ytdlpStatsTimer) {
+        clearInterval(ytdlpStatsTimer);
+        ytdlpStatsTimer = null;
+      }
+      ytdlpExited = true;
+      if (code !== 0) console.log(`yt-dlp exited with code ${code} [${mode}]`);
+      if (code !== 0 && !ffmpegExited) {
+        if (sawCookieAuthError) {
+          void refreshYtCookiesFromBrowser(`stream-auth-error:${mode}`, youtubeUrl);
+        } else if (sawChallengeError || ytdlpStdoutBytes === 0) {
+          void refreshYtCookiesFromBrowser(`stream-extractor-error:${mode}`, youtubeUrl);
+        }
+        if ((sawChallengeError || ytdlpStdoutBytes === 0) && maybeStartFallback()) {
+          return;
+        }
+      }
+      if (usingFallback && code !== 0 && !ffmpegProducedOutput) {
+        finishWithError(new Error(`yt-dlp fallback failed: ${stderrText.trim() || `exit ${code}`}`));
+      }
+    });
+    ffmpeg.on('exit', (code) => {
+      ffmpegExited = true;
+      if (code !== 0) console.log(`FFmpeg exited with code ${code} [${mode}]`);
+      if (ytdlpStatsTimer) {
+        clearInterval(ytdlpStatsTimer);
+        ytdlpStatsTimer = null;
+      }
+      if (!ytdlpExited && ytdlp.exitCode === null) {
+        ytdlp.kill();
+      }
+      if (code === 0 && (usingFallback || !startedFallback)) {
+        finishSuccess();
+        return;
+      }
+      if (!ffmpegProducedOutput && maybeStartFallback()) {
+        return;
+      }
+      if (usingFallback && !ffmpegProducedOutput) {
+        finishWithError(new Error(`ffmpeg fallback failed for ${youtubeUrl}`));
+      }
+    });
+  };
+
+  startAttempt('default');
   return passthrough;
 }
 function createPrefetchedFileStream(filePath: string): Readable {
