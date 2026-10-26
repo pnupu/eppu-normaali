@@ -1,11 +1,9 @@
 import crypto from 'crypto';
 import path from 'path';
 import sqlite3 from 'sqlite3';
-import youtubeDl, { Flags } from 'youtube-dl-exec';
-import fs from 'fs';
+import { youtubeTrack, type Track, type TrackSource } from '../music/sources';
 
 const AUTH_DB_PATH = process.env.WEB_AUTH_DB_PATH?.trim() || path.join(__dirname, '../../web-auth.db');
-const DEFAULT_COOKIES_PATH = path.join(__dirname, '../../cookies.txt');
 const db = new sqlite3.Database(AUTH_DB_PATH);
 
 interface RunResult {
@@ -23,13 +21,10 @@ export interface PlaylistSummary {
   songCount: number;
 }
 
-export interface PlaylistSong {
+export interface PlaylistSong extends Track {
   id: string;
   playlistId: string;
   position: number;
-  title: string;
-  url: string;
-  canonicalVideoId: string;
   addedBy: string;
   addedAt: number;
 }
@@ -37,12 +32,6 @@ export interface PlaylistSong {
 export interface PlaylistDetail extends PlaylistSummary {
   songs: PlaylistSong[];
   songNextCursor: string | null;
-}
-
-export interface PlaylistSongInput {
-  title: string;
-  url: string;
-  canonicalVideoId: string;
 }
 
 export interface BulkAddResult {
@@ -156,12 +145,30 @@ interface DbPlaylistSongRow {
   id: string;
   playlistId: string;
   position: number;
+  source: TrackSource;
   title: string;
   url: string;
-  canonicalVideoId: string;
+  trackKey: string;
+  duration: number | null;
+  thumbnail: string | null;
   addedBy: string;
   addedAt: number;
 }
+
+// canonical_video_id predates multi-source playlists; it now holds Track.key (bare YouTube id, sc:…, sp:…).
+const SONG_COLUMNS = `
+  id AS id,
+  playlist_id AS playlistId,
+  position AS position,
+  source AS source,
+  title AS title,
+  url AS url,
+  canonical_video_id AS trackKey,
+  duration AS duration,
+  thumbnail AS thumbnail,
+  added_by AS addedBy,
+  added_at AS addedAt
+`;
 
 const schemaReady = (async () => {
   await exec('PRAGMA foreign_keys = ON;');
@@ -191,6 +198,11 @@ const schemaReady = (async () => {
     )
   `);
 
+  const songColumns = new Set((await all<{ name: string }>(`PRAGMA table_info(playlist_songs)`)).map((c) => c.name));
+  if (!songColumns.has('source')) await run(`ALTER TABLE playlist_songs ADD COLUMN source TEXT NOT NULL DEFAULT 'youtube'`);
+  if (!songColumns.has('duration')) await run(`ALTER TABLE playlist_songs ADD COLUMN duration INTEGER`);
+  if (!songColumns.has('thumbnail')) await run(`ALTER TABLE playlist_songs ADD COLUMN thumbnail TEXT`);
+
   await run(`CREATE INDEX IF NOT EXISTS idx_playlists_name ON playlists(name COLLATE NOCASE)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_playlist_songs_playlist_position ON playlist_songs(playlist_id, position)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_playlist_songs_playlist_video_id ON playlist_songs(playlist_id, canonical_video_id)`);
@@ -210,13 +222,17 @@ function mapPlaylistRow(row: DbPlaylistRow): PlaylistSummary {
 }
 
 function mapSongRow(row: DbPlaylistSongRow): PlaylistSong {
+  const fallbackThumbnail = row.source === 'youtube' ? youtubeTrack(row.trackKey, row.title).thumbnail : null;
   return {
     id: row.id,
     playlistId: row.playlistId,
     position: row.position,
+    source: row.source,
+    key: row.trackKey,
     title: row.title,
     url: row.url,
-    canonicalVideoId: row.canonicalVideoId,
+    duration: row.duration,
+    thumbnail: row.thumbnail || fallbackThumbnail,
     addedBy: row.addedBy,
     addedAt: row.addedAt,
   };
@@ -391,15 +407,7 @@ export async function getPlaylistDetail(
   params.push(normalizedSongLimit + 1, offset);
 
   const rows = await all<DbPlaylistSongRow>(`
-    SELECT
-      id AS id,
-      playlist_id AS playlistId,
-      position AS position,
-      title AS title,
-      url AS url,
-      canonical_video_id AS canonicalVideoId,
-      added_by AS addedBy,
-      added_at AS addedAt
+    SELECT ${SONG_COLUMNS}
     FROM playlist_songs
     ${where}
     ORDER BY position ASC
@@ -419,15 +427,7 @@ export async function getPlaylistDetail(
 export async function getAllPlaylistSongs(playlistId: string): Promise<PlaylistSong[]> {
   await schemaReady;
   const rows = await all<DbPlaylistSongRow>(`
-    SELECT
-      id AS id,
-      playlist_id AS playlistId,
-      position AS position,
-      title AS title,
-      url AS url,
-      canonical_video_id AS canonicalVideoId,
-      added_by AS addedBy,
-      added_at AS addedAt
+    SELECT ${SONG_COLUMNS}
     FROM playlist_songs
     WHERE playlist_id = ?
     ORDER BY position ASC
@@ -435,15 +435,18 @@ export async function getAllPlaylistSongs(playlistId: string): Promise<PlaylistS
   return rows.map(mapSongRow);
 }
 
-export async function addSongsToPlaylist(playlistId: string, songs: PlaylistSongInput[], actor: string): Promise<BulkAddResult> {
+export async function addSongsToPlaylist(playlistId: string, songs: Track[], actor: string): Promise<BulkAddResult> {
   await schemaReady;
   await ensurePlaylistExists(playlistId);
 
   const cleanedSongs = songs
     .map((song) => ({
+      source: song.source,
       title: song.title?.trim() || '',
       url: song.url?.trim() || '',
-      canonicalVideoId: song.canonicalVideoId?.trim() || '',
+      key: song.key?.trim() || '',
+      duration: song.duration ?? null,
+      thumbnail: song.thumbnail ?? null,
     }));
 
   if (cleanedSongs.length === 0) {
@@ -463,7 +466,7 @@ export async function addSongsToPlaylist(playlistId: string, songs: PlaylistSong
     let nextPosition = ((maxRow?.maxPosition ?? -1) + 1);
 
     for (const song of cleanedSongs) {
-      if (!song.title || !song.url || !song.canonicalVideoId) {
+      if (!song.title || !song.url || !song.key) {
         failed += 1;
         continue;
       }
@@ -471,9 +474,9 @@ export async function addSongsToPlaylist(playlistId: string, songs: PlaylistSong
       try {
         const result = await run(
           `INSERT OR IGNORE INTO playlist_songs(
-            id, playlist_id, position, title, url, canonical_video_id, added_by, added_at
-          ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
-          [makeId(), playlistId, nextPosition, song.title, song.url, song.canonicalVideoId, actor, now()]
+            id, playlist_id, position, source, title, url, canonical_video_id, duration, thumbnail, added_by, added_at
+          ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [makeId(), playlistId, nextPosition, song.source, song.title, song.url, song.key, song.duration, song.thumbnail, actor, now()]
         );
         if (result.changes === 0) {
           skippedDuplicates += 1;
@@ -580,121 +583,4 @@ export async function movePlaylistSong(
   }
 
   return true;
-}
-
-interface YtRuntime {
-  jsRuntimes: string;
-  cookies: string | null;
-  cookiesFromBrowser: string | null;
-}
-
-function getYtRuntime(): YtRuntime {
-  const jsRuntimes = process.env.YTDLP_JS_RUNTIMES?.trim() || 'node';
-  const cookiesPath = process.env.YTDLP_COOKIES_FILE?.trim() || DEFAULT_COOKIES_PATH;
-  const cookies = fs.existsSync(cookiesPath) ? cookiesPath : null;
-  const cookiesFromBrowserRaw = process.env.YTDLP_COOKIES_FROM_BROWSER?.trim();
-  const cookiesFromBrowser = cookiesFromBrowserRaw || null;
-  return { jsRuntimes, cookies, cookiesFromBrowser };
-}
-
-function withYtRuntime(baseFlags: Flags): Flags {
-  const runtime = getYtRuntime();
-  const merged = { ...baseFlags } as Flags & { cookiesFromBrowser?: string };
-  merged.jsRuntimes = runtime.jsRuntimes as Flags['jsRuntimes'];
-  if (runtime.cookies) {
-    merged.cookies = runtime.cookies;
-  } else if (runtime.cookiesFromBrowser) {
-    merged.cookiesFromBrowser = runtime.cookiesFromBrowser;
-  }
-  return merged;
-}
-
-export function extractYouTubeVideoId(input: string): string | null {
-  const raw = input.trim();
-  if (!raw) return null;
-  if (/^[a-zA-Z0-9_-]{11}$/.test(raw)) return raw;
-
-  if (!/^https?:\/\//.test(raw)) return null;
-  try {
-    const parsed = new URL(raw);
-    const host = parsed.hostname.replace(/^www\./, '');
-    const v = parsed.searchParams.get('v');
-    if (v && /^[a-zA-Z0-9_-]{11}$/.test(v)) return v;
-    if (host === 'youtu.be') {
-      const first = parsed.pathname.split('/').filter(Boolean)[0];
-      if (first && /^[a-zA-Z0-9_-]{11}$/.test(first)) return first;
-    }
-    const shorts = parsed.pathname.match(/\/shorts\/([a-zA-Z0-9_-]{11})/);
-    if (shorts?.[1]) return shorts[1];
-    const embed = parsed.pathname.match(/\/embed\/([a-zA-Z0-9_-]{11})/);
-    if (embed?.[1]) return embed[1];
-  } catch {
-    return null;
-  }
-  return null;
-}
-
-export function canonicalYouTubeUrl(videoId: string): string {
-  return `https://www.youtube.com/watch?v=${videoId}`;
-}
-
-interface YtVideoInfo {
-  id?: string;
-  title?: string;
-  webpage_url?: string;
-  url?: string;
-}
-
-interface YtPlaylistInfo {
-  title?: string;
-  entries?: Array<{ id?: string; title?: string; url?: string }>;
-}
-
-export async function resolveYouTubeSong(url: string): Promise<PlaylistSongInput> {
-  const flags = withYtRuntime({
-    dumpSingleJson: true,
-    simulate: true,
-    format: 'bestaudio',
-  });
-  const info = await youtubeDl(url, flags) as unknown as YtVideoInfo;
-  const fallbackSource = info.webpage_url || info.url || url;
-  const canonicalVideoId = extractYouTubeVideoId(info.id || fallbackSource || '');
-  if (!canonicalVideoId) {
-    throw new Error('YouTube video ID not found in URL');
-  }
-  const title = (info.title || '').trim();
-  if (!title) {
-    throw new Error('Video title could not be resolved');
-  }
-  return {
-    title,
-    url: canonicalYouTubeUrl(canonicalVideoId),
-    canonicalVideoId,
-  };
-}
-
-export async function resolveYouTubePlaylistSongs(url: string): Promise<{ sourceTitle: string; songs: PlaylistSongInput[] }> {
-  const flags = withYtRuntime({
-    dumpSingleJson: true,
-    flatPlaylist: true,
-    simulate: true,
-  });
-  const payload = await youtubeDl(url, flags) as unknown as YtPlaylistInfo;
-  const entries = Array.isArray(payload.entries) ? payload.entries : [];
-  const songs: PlaylistSongInput[] = [];
-
-  for (const entry of entries) {
-    const canonicalVideoId = extractYouTubeVideoId(entry.id || entry.url || '');
-    if (!canonicalVideoId) continue;
-    songs.push({
-      title: (entry.title || `YouTube ${canonicalVideoId}`).trim(),
-      url: canonicalYouTubeUrl(canonicalVideoId),
-      canonicalVideoId,
-    });
-  }
-
-  return {
-    sourceTitle: (payload.title || 'Tuotu YouTube-soittolista').trim(),
-    songs,
-  };
 }

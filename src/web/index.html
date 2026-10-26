@@ -1,177 +1,133 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="fi">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Eppu Control Deck</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#2B0F17">
+  <title>Eppu · levyautomaatti</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Bowlby+One+SC&family=Courier+Prime:wght@400;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <div class="bg-layer" aria-hidden="true"></div>
+  <header class="marquee">
+    <div class="marquee-inner">
+      <p class="wordmark">Eppu <span>levyautomaatti</span></p>
+      <nav id="viewTabs" class="tabs hidden" aria-label="Näkymä">
+        <button class="tab" type="button" data-view="jukebox" aria-pressed="true">Jukeboksi</button>
+        <button class="tab" type="button" data-view="playlists" aria-pressed="false">Soittolistat</button>
+      </nav>
+      <p id="lamp" class="lamp" data-state="syncing"><span class="lamp-bulb" aria-hidden="true"></span><span id="lampText">Yhdistetään</span></p>
+    </div>
+  </header>
 
   <main class="shell">
-    <header class="hero panel">
-      <h1>Eppu Normaalin Jammailu Paneeli</h1>
-    </header>
-
-    <section id="loginSection" class="panel login-panel">
-      <h2>Kirjaudu</h2>
-      <p class="muted">Käytä Discordissa komentoa `/web-login`, niin saat kertakäyttöisen linkin yksityisviestillä.</p>
-      <p class="hint">Avaa linkki tässä selaimessa, niin ohjaus avautuu.</p>
-      <p id="loginHint" class="hint">Odotetaan kertakäyttöistä linkkiä...</p>
+    <section id="loginView" class="card login hidden">
+      <h1>Kirjaudu Discordin kautta</h1>
+      <p>Kirjoita Discordissa <code>/web-login</code>. Eppu lähettää sinulle yksityisviestillä kertakäyttöisen linkin. Avaa linkki tässä selaimessa.</p>
+      <p id="loginHint" class="hint" role="status"></p>
     </section>
 
-    <section id="mainSection" class="hidden">
-      <div class="layout">
-        <section class="panel span-2">
-          <div class="card-head">
-            <h2>Eppu soittaa</h2>
-            <div id="pollStatus" class="pill">Synkronoidaan</div>
+    <section id="jukeboxView" class="view hidden">
+      <div class="deck">
+        <section class="card now" aria-labelledby="nowHeading">
+          <h2 id="nowHeading" class="eyebrow">Nyt soi</h2>
+          <div id="nowStrip" class="now-strip idle">
+            <img id="nowArt" class="now-art" alt="" hidden>
+            <div class="strip strip-lg">
+              <p id="nowTitle" class="strip-title">Mikään ei soi</p>
+              <p id="nowMeta" class="strip-meta">Lisää kappale alta, niin Eppu aloittaa.</p>
+            </div>
           </div>
-          <div id="nowPlayingCard" class="now-wrap now-idle">
-            <p id="nowPlayingTitle" class="track-title">Ei toistoa juuri nyt</p>
-            <p id="nowPlayingMeta" class="muted">Avaa YouTube-haku tai liitä URL, niin Eppu aloittaa musiikin.</p>
-          </div>
+          <div class="progress" aria-hidden="true"><div id="progressFill" class="progress-fill"></div></div>
+          <p class="times"><span id="elapsed">0:00</span><span id="duration"></span></p>
           <div class="controls">
-            <button id="pauseBtn" class="btn btn-secondary" type="button">Tauko / Jatka</button>
-            <button id="skipBtn" class="btn btn-primary" type="button">Ohita</button>
+            <button id="pauseBtn" class="btn btn-amber" type="button" disabled>Tauko</button>
+            <button id="skipBtn" class="btn" type="button" disabled>Ohita</button>
+            <label class="volume">
+              <span>Äänenvoimakkuus</span>
+              <input id="volumeInput" type="range" min="0" max="100" step="1" value="100">
+              <output id="volumeOut" for="volumeInput">100 %</output>
+            </label>
           </div>
         </section>
 
-        <section class="panel">
-          <h2>Jonotyökalut</h2>
-          <button id="openSearchBtn" class="btn btn-primary" type="button">Hae YouTubesta</button>
-          <!--
-          <div class="voice-debug">
-            <h3 class="subhead">Äänikomento (debug)</h3>
-            <button id="pttBtn" class="btn btn-ghost" type="button">Pidä pohjassa ja puhu</button>
-            <p id="voiceDebugTranscript" class="muted tiny">Viimeisin puhe: -</p>
-            <p id="voiceStatus" class="status-msg hidden"></p>
-          </div>
-          <div class="voice-keywords">
-            <h3 class="subhead">Äänikomennon avainsanat</h3>
-            <form id="voiceKeywordForm" class="stacked">
-              <input id="voiceKeywordPhraseInput" class="input" type="text" placeholder="Avainsana, esim: 22" autocomplete="off">
-              <input id="voiceKeywordUrlInput" class="input" type="text" placeholder="YouTube-linkki avainsanalle" autocomplete="off">
-              <button class="btn btn-ghost" type="submit">Tallenna avainsana</button>
-            </form>
-            <p id="voiceKeywordStatus" class="status-msg hidden"></p>
-            <div id="voiceKeywordList" class="voice-keyword-list"></div>
-            <button id="voiceKeywordLoadMoreBtn" class="btn btn-ghost tiny hidden" type="button">Lataa lisää avainsanoja</button>
-          </div>
-          -->
-          <h3 class="subhead">Lisää URL-osoitteella</h3>
-          <form id="addForm" class="stacked">
-            <input id="urlInput" class="input" type="text" placeholder="Liitä YouTube-osoite" autocomplete="off" required>
-            <button class="btn btn-secondary" type="submit">Lisää URL</button>
+        <section class="card add" aria-labelledby="addHeading">
+          <h2 id="addHeading" class="eyebrow">Lisää jonoon</h2>
+          <form id="addForm" class="add-form">
+            <input id="addInput" class="input" type="text" inputmode="search" autocomplete="off"
+              placeholder="Hakusana tai linkki" aria-label="Hakusana tai linkki">
+            <button id="addBtn" class="btn btn-amber" type="submit">Hae</button>
           </form>
-          <p id="addStatus" class="status-msg hidden"></p>
+          <div class="source-row">
+            <fieldset id="searchSource" class="segmented">
+              <legend>Hae palvelusta</legend>
+              <label><input type="radio" name="searchSource" value="youtube" checked><span>YouTube</span></label>
+              <label><input type="radio" name="searchSource" value="soundcloud"><span>SoundCloud</span></label>
+            </fieldset>
+            <p class="hint">Linkit YouTubesta, SoundCloudista ja Spotifysta menevät suoraan jonoon, myös soittolistat ja albumit.</p>
+          </div>
+          <p id="addStatus" class="status" role="status"></p>
+          <ol id="results" class="results"></ol>
         </section>
-
-        <section class="panel span-2">
-          <div class="card-head">
-            <h2>Jono</h2>
-          </div>
-          <div id="queueList" class="queue-list"></div>
-        </section>
-
-        <!--
-        <section class="panel span-2 playlist-panel">
-          <div class="card-head">
-            <h2>Soittolistat</h2>
-          </div>
-
-          <div class="playlist-top-controls">
-            <input id="playlistSearchInput" class="input" type="text" placeholder="Hae soittolistoja">
-            <button id="createPlaylistBtn" class="btn btn-primary" type="button">Uusi soittolista</button>
-          </div>
-
-          <div class="playlist-layout">
-            <aside class="playlist-library">
-              <div id="playlistList" class="playlist-list"></div>
-              <button id="playlistLoadMoreBtn" class="btn btn-ghost tiny hidden" type="button">Lataa lisää</button>
-            </aside>
-
-            <section class="playlist-detail">
-              <div class="playlist-detail-head">
-                <h3 id="playlistTitle">Valitse soittolista</h3>
-                <div class="playlist-detail-actions">
-                  <button id="renamePlaylistBtn" class="btn btn-ghost tiny" type="button">Nimeä uudelleen</button>
-                  <button id="deletePlaylistBtn" class="btn btn-ghost tiny" type="button">Poista</button>
-                  <button id="playPlaylistBtn" class="btn btn-secondary tiny" type="button">Soita</button>
-                  <button id="playPlaylistShuffleBtn" class="btn btn-primary tiny" type="button">Soita sekoitettuna</button>
-                </div>
-              </div>
-
-              <form id="playlistSongForm" class="stacked playlist-inline-form">
-                <input id="playlistSongUrlInput" class="input" type="text" placeholder="Lisää kappale URL:sta valittuun soittolistaan" autocomplete="off">
-                <button class="btn btn-ghost tiny" type="submit">Lisää kappale</button>
-              </form>
-
-              <div class="playlist-queue-tools">
-                <button id="saveQueueToPlaylistBtn" class="btn btn-ghost tiny" type="button">Tallenna koko jono tähän</button>
-                <button id="saveSelectedQueueBtn" class="btn btn-ghost tiny" type="button">Valitse jonosta tähän</button>
-                <button id="createPlaylistFromQueueBtn" class="btn btn-ghost tiny" type="button">Uusi soittolista jonosta</button>
-              </div>
-
-              <form id="playlistImportForm" class="stacked playlist-inline-form">
-                <input id="playlistImportNameInput" class="input" type="text" placeholder="YouTube-tuonnin nimi (valinnainen)">
-                <input id="playlistImportUrlInput" class="input" type="text" placeholder="YouTube-soittolistan URL">
-                <button class="btn btn-ghost tiny" type="submit">Tuo YouTubesta</button>
-              </form>
-
-              <p id="playlistStatus" class="status-msg hidden"></p>
-
-              <input id="playlistSongSearchInput" class="input" type="text" placeholder="Hae kappaleita valitusta soittolistasta">
-              <div id="playlistSongList" class="playlist-song-list"></div>
-              <button id="playlistSongsLoadMoreBtn" class="btn btn-ghost tiny hidden" type="button">Lataa lisää kappaleita</button>
-            </section>
-          </div>
-        </section>
-        -->
-
       </div>
 
-      <footer class="panel footer-panel">
-        <p id="userInfo" class="muted"></p>
-      </footer>
+      <section class="card queue" aria-labelledby="queueHeading">
+        <div class="card-head">
+          <h2 id="queueHeading" class="eyebrow">Jonossa</h2>
+          <p id="queueSummary" class="summary"></p>
+          <button id="saveQueueBtn" class="btn btn-small" type="button" disabled>Tallenna soittolistaksi</button>
+        </div>
+        <ol id="queueList" class="strips"></ol>
+      </section>
+    </section>
+
+    <section id="playlistsView" class="view hidden">
+      <div class="library">
+        <aside class="card shelf" aria-labelledby="shelfHeading">
+          <h2 id="shelfHeading" class="eyebrow">Soittolistat</h2>
+          <button id="newPlaylistBtn" class="btn btn-amber btn-block" type="button">Uusi soittolista</button>
+          <form id="importForm" class="stack">
+            <label class="field-label" for="importInput">Tuo linkistä</label>
+            <input id="importInput" class="input" type="url" autocomplete="off"
+              placeholder="YouTube-, SoundCloud- tai Spotify-linkki">
+            <button class="btn btn-block" type="submit">Tuo soittolistaksi</button>
+          </form>
+          <p id="shelfStatus" class="status" role="status"></p>
+          <ul id="playlistList" class="shelf-list"></ul>
+        </aside>
+
+        <section id="playlistDetail" class="card detail" aria-live="polite"></section>
+      </div>
     </section>
   </main>
 
-  <section id="searchModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="searchModalTitle">
-    <div class="modal-backdrop" data-modal-close="1"></div>
-    <div class="modal-card panel">
-      <div class="modal-head">
-        <h2 id="searchModalTitle">YouTube-haku</h2>
-        <button id="closeSearchBtn" class="btn btn-ghost" type="button" aria-label="Sulje haku">Sulje</button>
+  <dialog id="nameDialog" class="dialog">
+    <form method="dialog" class="stack">
+      <h2 id="nameDialogTitle">Uusi soittolista</h2>
+      <label class="field-label" for="nameDialogInput">Nimi</label>
+      <input id="nameDialogInput" class="input" type="text" maxlength="80" required autocomplete="off">
+      <div class="dialog-actions">
+        <button class="btn" value="cancel" formnovalidate type="submit">Peruuta</button>
+        <button id="nameDialogConfirm" class="btn btn-amber" value="confirm" type="submit">Luo</button>
       </div>
-      <form id="searchForm" class="stacked">
-        <input id="searchInput" class="input" type="text" placeholder="Hae kappaleita YouTubesta" autocomplete="off" required>
-        <button class="btn btn-primary" type="submit">Hae</button>
-      </form>
-      <p id="searchStatus" class="status-msg hidden"></p>
-      <div id="searchResults" class="search-results"></div>
-    </div>
-  </section>
+    </form>
+  </dialog>
 
-  <section id="queueSelectModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="queueSelectTitle">
-    <div class="modal-backdrop" data-modal-close="queue-select"></div>
-    <div class="modal-card panel">
-      <div class="modal-head">
-        <h2 id="queueSelectTitle">Valitse jonosta kappaleet</h2>
-        <button id="closeQueueSelectBtn" class="btn btn-ghost" type="button">Sulje</button>
+  <dialog id="pickDialog" class="dialog">
+    <form method="dialog" class="stack">
+      <h2>Lisää soittolistaan</h2>
+      <p id="pickDialogTrack" class="pick-track"></p>
+      <ul id="pickDialogList" class="pick-list"></ul>
+      <div class="dialog-actions">
+        <button class="btn" value="cancel" type="submit">Sulje</button>
+        <button id="pickDialogNew" class="btn btn-amber" type="button">Uusi soittolista</button>
       </div>
-      <p class="muted tiny">Valitut kappaleet lisätään valittuun soittolistaan.</p>
-      <div id="queueSelectList" class="queue-select-list"></div>
-      <p id="queueSelectStatus" class="status-msg hidden"></p>
-      <button id="queueSelectConfirmBtn" class="btn btn-primary" type="button">Tallenna valitut</button>
-    </div>
-  </section>
+    </form>
+  </dialog>
 
-  <div id="toastStack" class="toast-stack" aria-live="polite" aria-atomic="true"></div>
+  <div id="toastStack" class="toast-stack" aria-live="polite"></div>
 
   <script src="/app.js" defer></script>
 </body>

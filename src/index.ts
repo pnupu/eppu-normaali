@@ -3,6 +3,10 @@ import { config } from 'dotenv';
 import { handlePlay, handlePause, handleResume, handleSkip, handleQueue, handleNukkumaan, handleHelp, handleCleanup, checkAndLeaveIfNeeded } from './commands/play';
 import { startWebServer } from './web/server';
 import { createDiscordLoginLink } from './web/auth';
+import { DEFAULT_VOICE_KEYWORDS, executeVoiceCommand } from './voice/commandExecutor';
+import { setDiscordVoiceCommandHandler, startDefaultDiscordVoiceReceiver } from './voice/discordVoiceRuntime';
+import { loadVoiceKeywordMap } from './web/voiceKeywords';
+import { flushUsageLog, logUsage, type UsageLogFields } from './usageLog';
 
 config();
 
@@ -42,11 +46,11 @@ const GUILD_COMMANDS = [
     .setDescription('Saat kertakäyttöisen kirjautumislinkin yksityisviestillä'),
   new SlashCommandBuilder()
     .setName(PLAY_COMMAND)
-    .setDescription('Toista YouTube-osoite')
+    .setDescription('Toista kappale tai soittolista YouTubesta, SoundCloudista tai Spotifysta')
     .addStringOption(option =>
       option
         .setName('url')
-        .setDescription('YouTube-osoite')
+        .setDescription('Linkki tai hakusana')
         .setRequired(true)
     ),
   new SlashCommandBuilder()
@@ -142,6 +146,21 @@ function buildWebLoginUrl(baseUrl: string, loginToken: string): string {
   return url.toString();
 }
 
+function displayNameForUser(user: { globalName?: string | null; username?: string | null } | null | undefined): string | null {
+  return user?.globalName || user?.username || null;
+}
+
+function interactionUsageContext(interaction: any): UsageLogFields {
+  return {
+    source: 'discord',
+    guildId: interaction.guildId ?? null,
+    guildName: interaction.guild?.name ?? null,
+    channelId: interaction.channelId ?? null,
+    userId: interaction.user?.id ?? null,
+    username: displayNameForUser(interaction.user),
+  };
+}
+
 async function resolveTargetGuild(client: Client): Promise<Guild | null> {
   const targetGuildId = process.env.WEB_LOGIN_GUILD_ID || process.env.DISCORD_GUILD_ID;
   if (targetGuildId) {
@@ -171,8 +190,20 @@ async function registerGuildCommands(client: Client) {
   try {
     await guild.commands.set(GUILD_COMMANDS);
     console.log(`Registered ${GUILD_COMMANDS.length} slash commands in guild: ${guild.name}`);
+    logUsage('discord.commands_registered', {
+      source: 'discord',
+      guildId: guild.id,
+      guildName: guild.name,
+      commandCount: GUILD_COMMANDS.length,
+    });
   } catch (error) {
     console.error('Failed to register slash commands:', error);
+    logUsage('discord.commands_register_failed', {
+      source: 'discord',
+      guildId: guild.id,
+      guildName: guild.name,
+      error,
+    });
   }
 }
 
@@ -237,11 +268,21 @@ async function handleWebLoginCommand(interaction: ChatInputCommandInteraction) {
 
   const baseUrl = getWebBaseUrl();
   if (!baseUrl) {
+    logUsage('web_login.failed', {
+      ...interactionUsageContext(interaction),
+      reason: 'invalid_web_base_url',
+      commandName: WEB_LOGIN_COMMAND,
+    });
     await safeEditReply(interaction, 'WEB_BASE_URL puuttuu tai on virheellinen botin ympäristöasetuksissa.');
     return;
   }
 
   if (!interaction.guildId) {
+    logUsage('web_login.failed', {
+      ...interactionUsageContext(interaction),
+      reason: 'missing_guild',
+      commandName: WEB_LOGIN_COMMAND,
+    });
     await safeEditReply(interaction, 'Suorita tämä komento Discord-palvelimellasi.');
     return;
   }
@@ -254,22 +295,99 @@ async function handleWebLoginCommand(interaction: ChatInputCommandInteraction) {
   );
   const loginUrl = buildWebLoginUrl(baseUrl, token);
   const expiresAtUnix = Math.floor(expiresAt / 1000);
+  const replyMessage =
+    `Epun kertakäyttöinen verkkokirjautumislinkki:\n${loginUrl}\n\n` +
+    `Linkki toimii kerran ja vanhenee <t:${expiresAtUnix}:R>`;
   
   try {
-    await interaction.user.send(
-      `Epun kertakäyttöinen verkkokirjautumislinkki:\n${loginUrl}\n\nLinkki toimii kerran ja vanhenee <t:${expiresAtUnix}:R>`
-    );
-    await safeEditReply(interaction, 'Lähetin sinulle yksityisviestillä kertakäyttöisen kirjautumislinkin.');
+    await interaction.user.send(replyMessage);
+    await safeEditReply(interaction, `${replyMessage}\n\nLähetin saman linkin myös yksityisviestillä.`);
+    logUsage('web_login.created', {
+      ...interactionUsageContext(interaction),
+      commandName: WEB_LOGIN_COMMAND,
+      expiresAt: new Date(expiresAt),
+      dmSent: true,
+    });
   } catch (error) {
     console.error('Failed to DM web login link:', error);
-    await safeEditReply(interaction, 'Yksityisviestin lähetys epäonnistui. Tarkista yksityisyysasetukset ja yritä uudelleen.');
+    await safeEditReply(interaction, `${replyMessage}\n\nYksityisviestin lähetys epäonnistui, mutta tämä viesti näkyy vain sinulle.`);
+    logUsage('web_login.created', {
+      ...interactionUsageContext(interaction),
+      commandName: WEB_LOGIN_COMMAND,
+      expiresAt: new Date(expiresAt),
+      dmSent: false,
+      dmError: error,
+    });
   }
 }
 
 client.once(Events.ClientReady, async () => {
   console.log('Bot is ready!');
+  logUsage('bot.ready', {
+    source: 'discord',
+    botUserId: client.user?.id ?? null,
+    botTag: client.user?.tag ?? null,
+    guildCount: client.guilds.cache.size,
+  });
 
-  await registerGuildCommands(client);
+  if (envBool(process.env.REGISTER_SLASH_COMMANDS_ON_STARTUP)) {
+    await registerGuildCommands(client);
+  } else {
+    console.log('Slash command registration skipped (REGISTER_SLASH_COMMANDS_ON_STARTUP is not enabled).');
+    logUsage('discord.commands_registration_skipped', {
+      source: 'discord',
+      reason: 'startup_registration_disabled',
+    });
+  }
+
+  setDiscordVoiceCommandHandler(async ({ guildId, userId, transcript }) => {
+    const startedAt = Date.now();
+    let voiceKeywordMap = DEFAULT_VOICE_KEYWORDS;
+    try {
+      voiceKeywordMap = { ...DEFAULT_VOICE_KEYWORDS, ...await loadVoiceKeywordMap() };
+    } catch (error) {
+      console.error('[discord-voice] Failed to load persisted voice keywords, using defaults:', error);
+    }
+
+    const user = await client.users.fetch(userId).catch(() => null);
+    const requestedBy = user?.globalName || user?.username || `Discord Voice ${userId}`;
+    try {
+      const result = await executeVoiceCommand(client, guildId, requestedBy, transcript, voiceKeywordMap);
+      console.log(
+        `[discord-voice] command guild=${guildId} user=${userId} intent=${result.intent} `
+        + `ok=${result.ok} status=${result.status} message="${result.message}" `
+        + `${result.resolvedUrl ? `url=${result.resolvedUrl}` : ''}`
+      );
+      logUsage('voice.command', {
+        source: 'discord_voice',
+        guildId,
+        userId,
+        username: requestedBy,
+        transcript,
+        intent: result.intent,
+        ok: result.ok,
+        status: result.status,
+        message: result.message,
+        queuedTitle: result.queuedTitle,
+        resolvedUrl: result.resolvedUrl,
+        durationMs: Date.now() - startedAt,
+      });
+    } catch (error) {
+      logUsage('voice.command', {
+        source: 'discord_voice',
+        guildId,
+        userId,
+        username: requestedBy,
+        transcript,
+        ok: false,
+        error,
+        durationMs: Date.now() - startedAt,
+      });
+      throw error;
+    }
+  });
+
+  await startDefaultDiscordVoiceReceiver(client);
   
   // Start web UI server
   startWebServer(client);
@@ -302,8 +420,14 @@ client.on(Events.ShardReady, (shardId) => {
 
 // Handle button interactions
 client.on('interactionCreate', async (interaction) => {
+  let activeUsageContext: UsageLogFields = {};
   try {
     if (interaction.isChatInputCommand()) {
+      activeUsageContext = {
+        ...interactionUsageContext(interaction),
+        commandName: interaction.commandName,
+      };
+      logUsage('discord.slash_command', activeUsageContext);
       switch (interaction.commandName) {
         case WEB_LOGIN_COMMAND:
           await handleWebLoginCommand(interaction);
@@ -347,6 +471,12 @@ client.on('interactionCreate', async (interaction) => {
 
     if (!interaction.isButton()) return;
 
+    activeUsageContext = {
+      ...interactionUsageContext(interaction),
+      customId: interaction.customId,
+    };
+    logUsage('discord.button', activeUsageContext);
+
     switch (interaction.customId) {
       case 'pause':
         await interaction.deferUpdate();
@@ -363,6 +493,10 @@ client.on('interactionCreate', async (interaction) => {
     }
   } catch (error) {
     console.error('interactionCreate handler failed:', error);
+    logUsage('discord.interaction_failed', {
+      ...activeUsageContext,
+      error,
+    });
 
     if (!interaction.isRepliable()) return;
 
@@ -400,18 +534,25 @@ client.on('voiceStateUpdate', (oldState, newState) => {
 });
 
 // Graceful shutdown
-process.on('SIGINT', () => {
+let shuttingDown = false;
+
+async function shutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
   console.log('Shutting down gracefully...');
+  logUsage('bot.shutdown', { source: 'process', signal });
 
   client.destroy();
+  await flushUsageLog();
   process.exit(0);
+}
+
+process.on('SIGINT', () => {
+  void shutdown('SIGINT');
 });
 
 process.on('SIGTERM', () => {
-  console.log('Shutting down gracefully...');
-
-  client.destroy();
-  process.exit(0);
+  void shutdown('SIGTERM');
 });
 
 client.login(process.env.DISCORD_TOKEN);

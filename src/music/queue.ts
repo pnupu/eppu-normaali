@@ -1,9 +1,8 @@
 // src/music/queue.ts
-import { AudioPlayer, AudioResource } from '@discordjs/voice';
+import { AudioPlayer } from '@discordjs/voice';
+import type { Track } from './sources';
 
-export interface QueueItem {
-  title: string;
-  url: string;
+export interface QueueItem extends Track {
   requestedBy: string;
 }
 
@@ -11,7 +10,8 @@ export class MusicQueue {
   private queue: QueueItem[] = [];
   private currentSong: QueueItem | null = null;
   private player: AudioPlayer;
-  private isPaused = false;
+  /** Skip pressed before the current song's audio started (the player was still idle). */
+  private skipPending = false;
 
   constructor(player: AudioPlayer) {
     this.player = player;
@@ -32,29 +32,31 @@ export class MusicQueue {
   getNextSong(): QueueItem | null {
     // Set current song to the next in queue
     this.currentSong = this.queue.shift() || null;
+    this.skipPending = false;
     return this.currentSong;
   }
 
+  // Pause state comes from the player itself, so it can't drift when a new track starts.
   pause() {
-    if (!this.isPaused) {
-      this.player.pause();
-      this.isPaused = true;
-      return true;
-    }
-    return false;
+    return this.player.pause();
   }
 
   resume() {
-    if (this.isPaused) {
-      this.player.unpause();
-      this.isPaused = false;
-      return true;
-    }
-    return false;
+    return this.player.unpause();
   }
 
   skip() {
+    if (this.player.state.status === 'idle' && this.currentSong) {
+      this.skipPending = true;
+      return;
+    }
     this.player.stop();
+  }
+
+  consumePendingSkip(): boolean {
+    const pending = this.skipPending;
+    this.skipPending = false;
+    return pending;
   }
 
   clear() {
@@ -80,7 +82,7 @@ export class MusicQueue {
   }
 
   isPausedState(): boolean {
-    return this.isPaused;
+    return this.player.state.status === 'paused';
   }
 
   removeSong(index: number): boolean {

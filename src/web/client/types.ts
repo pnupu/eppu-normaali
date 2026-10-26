@@ -1,6 +1,16 @@
-export interface QueueSong {
+export type TrackSource = 'youtube' | 'soundcloud' | 'spotify';
+export type SearchSource = 'youtube' | 'soundcloud';
+
+export interface Track {
+  source: TrackSource;
+  key: string;
   title: string;
   url: string;
+  duration: number | null;
+  thumbnail: string | null;
+}
+
+export interface QueueSong extends Track {
   requestedBy: string;
 }
 
@@ -10,18 +20,10 @@ export interface GuildPlaybackState {
   queue: QueueSong[];
   paused: boolean;
   volume: number;
+  positionMs: number | null;
 }
 
 export type PlaybackStateMap = Record<string, GuildPlaybackState>;
-
-export interface WebSearchResult {
-  id: string;
-  title: string;
-  url: string;
-  duration: number | null;
-  channel: string | null;
-  thumbnail: string | null;
-}
 
 export interface PlaylistSummary {
   id: string;
@@ -33,13 +35,10 @@ export interface PlaylistSummary {
   songCount: number;
 }
 
-export interface PlaylistSong {
+export interface PlaylistSong extends Track {
   id: string;
   playlistId: string;
   position: number;
-  title: string;
-  url: string;
-  canonicalVideoId: string;
   addedBy: string;
   addedAt: number;
 }
@@ -49,23 +48,18 @@ export interface PlaylistDetail extends PlaylistSummary {
   songNextCursor: string | null;
 }
 
-export interface PlaylistOperationResult {
+export interface BulkResult {
   added: number;
   skippedDuplicates: number;
   failed: number;
 }
 
-export interface PlaylistListResponse {
-  ok?: boolean;
-  items?: PlaylistSummary[];
-  nextCursor?: string | null;
-  error?: string;
-}
-
-export interface PlaylistDetailResponse {
-  ok?: boolean;
-  playlist?: PlaylistDetail;
-  error?: string;
+export interface EnqueueResponse {
+  ok: true;
+  added: number;
+  skipped: number;
+  name: string | null;
+  firstTitle: string | null;
 }
 
 export interface WebConfig {
@@ -76,43 +70,4 @@ export interface WebConfig {
   defaultGuildId?: string | null;
 }
 
-export interface AuthProfile {
-  email?: string | null;
-  name?: string | null;
-  isAdmin?: boolean;
-  localMode?: boolean;
-}
-
-export interface ApiResult {
-  ok?: boolean;
-  error?: string;
-  paused?: boolean;
-}
-
-export interface VoiceCommandResponse extends ApiResult {
-  message?: string;
-  intent?: string;
-  queuedTitle?: string;
-  resolvedUrl?: string;
-  transcript?: string;
-}
-
-export interface VoiceKeyword {
-  phrase: string;
-  url: string;
-  canonicalVideoId: string;
-  updatedBy: string;
-  updatedAt: number;
-  createdAt: number;
-}
-
-export interface VoiceKeywordListResponse {
-  ok?: boolean;
-  items?: VoiceKeyword[];
-  nextCursor?: string | null;
-  error?: string;
-}
-
-export type StatusTone = 'info' | 'ok' | 'error';
 export type ToastMood = 'happy' | 'stern' | 'neutral';
-export type PollBadgeState = 'syncing' | 'ready' | 'live' | 'degraded';

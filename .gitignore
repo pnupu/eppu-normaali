@@ -22,6 +22,10 @@ __pycache__/
 *.egg-info/
 
 # Training (wake word)
+training/work/
+training/.venv/
+voice-samples/
+tmp/
 train-wake-word/venv/
 train-wake-word/venv310/
 train-wake-word/.precise-venv/
@@ -180,3 +184,9 @@ dist
 
 cookies.txt
 .claude/
+AGENTS.local.md
+
+# Local voice environment and trained model artifacts
+.venv-voice/
+models/*.onnx
+models/*.pkl

@@ -1,0 +1,69 @@
+# openWakeWord training config for the "Hei Eppu" wake phrase.
+# Used by work/openwakeword/openwakeword/train.py — see train.sh.
+
+model_name: "hei_eppu"
+
+# The TTS generator is English (LibriTTS-R, thousands of voices), so the wake
+# phrase is written phonetically for English letter-to-sound rules. Finnish
+# "Hei Eppu" ≈ "hey eppu". Multiple spellings add pronunciation variety;
+# the model activates on any of them. Real Finnish-voice clips are added
+# separately by generate_finnish_clips.py and mix_real_samples.py.
+target_phrase:
+  - "hey eppu"
+  - "hey eppoo"
+  - "hay eppu"
+
+# Near-miss phrases that must NOT activate the model (in addition to the
+# automatically generated phoneme-overlap adversarial phrases).
+custom_negative_phrases:
+  - "hey"
+  - "eppu"
+  - "eppu normaali"
+  - "hello"
+  - "hey epic"
+  - "hey oppo"
+
+# Positive samples for training/validation. 20000 is the recommended minimum;
+# raise if the trained model is not accurate enough (generation takes longer).
+n_samples: 20000
+n_samples_val: 1500
+
+tts_batch_size: 50
+augmentation_batch_size: 16
+
+# Each generated clip is augmented this many times (noise/reverb randomness
+# makes every round unique) — cheap way to get more effective training data.
+augmentation_rounds: 2
+
+# Points at training/shim, which bridges openWakeWord's v2-era import to the
+# pip-installed piper-sample-generator v3 (works on Apple Silicon).
+piper_sample_generator_path: "./shim"
+
+# Clips/features land in work/hei_eppu/, the trained model in work/hei_eppu.onnx
+output_dir: "./work"
+
+rir_paths:
+  - "./work/mit_rirs"
+
+# AudioSet balanced-train clips cover noise and music alike
+background_paths:
+  - "./work/audioset_16k"
+background_paths_duplication_rate:
+  - 1
+
+false_positive_validation_data_path: "./work/validation_set_features.npy"
+
+feature_data_files:
+  "ACAV100M_sample": "./work/openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
+
+batch_n_per_class:
+  "ACAV100M_sample": 1024
+  "adversarial_negative": 50
+  "positive": 50
+
+model_type: "dnn"
+layer_size: 32
+
+steps: 50000
+max_negative_weight: 1500
+target_false_positives_per_hour: 0.2

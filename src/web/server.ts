@@ -3,15 +3,16 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { Client } from 'discord.js';
-import { queues, addSongFromWeb, getVolume, refreshNextSongPrefetch, searchYouTubeFromWeb, setVolume } from '../commands/play';
+import { queues, enqueueFromWeb, getPlaybackPositionMs, getVolume, refreshNextSongPrefetch, setVolume } from '../commands/play';
+import { classifyInput, extractYouTubeVideoId, ResolveError, resolveInput, searchTracks, youtubeTrack, type Track } from '../music/sources';
+import type { QueueItem } from '../music/queue';
+import { DEFAULT_VOICE_KEYWORDS, executeVoiceCommand } from '../voice/commandExecutor';
 import { consumeDiscordLoginLink, getSessionFromCookie, logoutSessionFromCookie } from './auth';
 import {
   addSongsToPlaylist,
   BulkAddResult,
-  canonicalYouTubeUrl,
   createPlaylist,
   deletePlaylist,
-  extractYouTubeVideoId,
   getAllPlaylistSongs,
   getPlaylistDetail,
   listPlaylists,
@@ -20,8 +21,6 @@ import {
   PlaylistNotFoundError,
   removePlaylistSong,
   renamePlaylist,
-  resolveYouTubePlaylistSongs,
-  resolveYouTubeSong,
 } from './playlists';
 import {
   deleteVoiceKeyword,
@@ -29,6 +28,7 @@ import {
   loadVoiceKeywordMap,
   upsertVoiceKeyword,
 } from './voiceKeywords';
+import { logUsage, type UsageLogFields } from '../usageLog';
 
 const HTML_PATH = path.join(__dirname, '../../src/web/index.html');
 const CSS_PATH = path.join(__dirname, '../../src/web/styles.css');
@@ -49,14 +49,39 @@ interface RateLimitEntry {
 }
 
 const RATE_LIMIT_WINDOW_MS = 60_000;
-const DEFAULT_VOICE_KEYWORDS: Record<string, string> = Object.freeze({
-  '22': 'https://www.youtube.com/watch?v=zI7WGJFKfsE',
-});
-
 function envBool(value: string | undefined, fallback = false): boolean {
   if (!value) return fallback;
   const normalized = value.trim().toLowerCase();
   return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+}
+
+function envBoolOptional(value: string | undefined): boolean | null {
+  if (!value) return null;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on') return true;
+  if (normalized === '0' || normalized === 'false' || normalized === 'no' || normalized === 'off') return false;
+  return null;
+}
+
+function publicBaseUrlProtocol(): string | null {
+  const baseUrl = process.env.WEB_BASE_URL?.trim();
+  if (!baseUrl) return null;
+  try {
+    return new URL(baseUrl).protocol;
+  } catch {
+    return null;
+  }
+}
+
+function resolveSecureCookieDefault(exposureMode: ExposureMode): boolean {
+  const explicit = envBoolOptional(process.env.WEB_COOKIE_SECURE);
+  if (explicit !== null) return explicit;
+
+  const protocol = publicBaseUrlProtocol();
+  if (protocol === 'https:') return true;
+  if (protocol === 'http:') return false;
+
+  return exposureMode === 'tunnel';
 }
 
 function makeEtag(content: Buffer | string): string {
@@ -100,6 +125,34 @@ function parseVoiceKeywordConfig(value: string | undefined): Record<string, stri
 function getRequestOrigin(req: http.IncomingMessage): string | null {
   const origin = req.headers.origin;
   return typeof origin === 'string' ? origin : null;
+}
+
+function getPublicBaseUrlOrigin(): string | null {
+  const baseUrl = process.env.WEB_BASE_URL?.trim();
+  if (!baseUrl) return null;
+  try {
+    return new URL(baseUrl).origin;
+  } catch {
+    return null;
+  }
+}
+
+function getRequestHostOrigin(req: http.IncomingMessage, trustProxy: boolean): string | null {
+  const forwardedHost = trustProxy ? req.headers['x-forwarded-host'] : undefined;
+  const hostHeader = Array.isArray(forwardedHost)
+    ? forwardedHost[0]
+    : (forwardedHost || req.headers.host);
+  if (!hostHeader) return null;
+
+  const forwardedProto = trustProxy ? req.headers['x-forwarded-proto'] : undefined;
+  const protoHeader = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
+  const protocol = protoHeader?.split(',')[0]?.trim() || 'http';
+
+  try {
+    return new URL(`${protocol}://${hostHeader}`).origin;
+  } catch {
+    return null;
+  }
 }
 
 function getClientIp(req: http.IncomingMessage): string {
@@ -181,13 +234,18 @@ function applyCorsHeaders(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   exposureMode: ExposureMode,
-  allowedOrigins: Set<string>
+  allowedOrigins: Set<string>,
+  trustProxy: boolean
 ): boolean {
   const origin = getRequestOrigin(req);
   const hasOrigin = !!origin;
+  const publicOrigin = getPublicBaseUrlOrigin();
+  const requestHostOrigin = getRequestHostOrigin(req, trustProxy);
   const originAllowed = !origin
     || exposureMode === 'local'
-    || allowedOrigins.has(origin);
+    || allowedOrigins.has(origin)
+    || origin === publicOrigin
+    || origin === requestHostOrigin;
 
   if (hasOrigin) {
     res.setHeader('Vary', 'Origin');
@@ -266,54 +324,62 @@ function shuffleArray<T>(input: T[]): T[] {
   return result;
 }
 
-function queueSelectionToPlaylistInputs(
+function toTrack(item: QueueItem): Track {
+  const { requestedBy: _requestedBy, ...track } = item;
+  return track;
+}
+
+function queueSelectionToTracks(
   guildId: string,
   includeCurrent: boolean,
   selectedIndices: number[] | null
-): { songs: Array<{ title: string; url: string; canonicalVideoId: string }>; skipped: number; queueFound: boolean } {
+): { songs: Track[]; skipped: number; queueFound: boolean } {
   const queue = queues.get(guildId);
   if (!queue) {
     return { songs: [], skipped: 0, queueFound: false };
   }
-
-  const songs: Array<{ title: string; url: string; canonicalVideoId: string }> = [];
+  const songs: Track[] = [];
   let skipped = 0;
-
-  const pushSong = (title: string, url: string) => {
-    const canonicalId = extractYouTubeVideoId(url);
-    if (!canonicalId) {
-      skipped += 1;
-      return;
-    }
-    songs.push({
-      title: title.trim() || `YouTube ${canonicalId}`,
-      url: canonicalYouTubeUrl(canonicalId),
-      canonicalVideoId: canonicalId,
-    });
-  };
-
   const currentSong = queue.getCurrentSong();
-  if (includeCurrent && currentSong) {
-    pushSong(currentSong.title, currentSong.url);
-  }
-
+  if (includeCurrent && currentSong) songs.push(toTrack(currentSong));
   const queuedSongs = queue.getQueue();
-  if (selectedIndices !== null) {
-    for (const index of selectedIndices) {
-      if (index < 0 || index >= queuedSongs.length) {
-        skipped += 1;
-        continue;
-      }
-      const item = queuedSongs[index];
-      pushSong(item.title, item.url);
-    }
-  } else {
-    for (const item of queuedSongs) {
-      pushSong(item.title, item.url);
-    }
+  for (const index of selectedIndices ?? queuedSongs.map((_, i) => i)) {
+    const item = queuedSongs[index];
+    if (item) songs.push(toTrack(item));
+    else skipped += 1;
   }
-
   return { songs, skipped, queueFound: true };
+}
+
+const TRACK_SOURCES = new Set(['youtube', 'soundcloud', 'spotify']);
+
+/**
+ * Validate a track sent back by the browser (search results, saved songs). The URL must belong to the claimed
+ * source, so a crafted request cannot point yt-dlp at arbitrary URLs.
+ */
+function parseClientTrack(value: unknown): Track | null {
+  const raw = value as Partial<Record<keyof Track, unknown>> | null;
+  if (!raw || typeof raw !== 'object') return null;
+  const source = raw.source;
+  const title = typeof raw.title === 'string' ? raw.title.trim().slice(0, 300) : '';
+  const url = typeof raw.url === 'string' ? raw.url.trim() : '';
+  if (typeof source !== 'string' || !TRACK_SOURCES.has(source) || !title || !url) return null;
+  const duration = typeof raw.duration === 'number' && Number.isFinite(raw.duration) && raw.duration > 0
+    ? Math.round(raw.duration)
+    : null;
+  const thumbnail = typeof raw.thumbnail === 'string' && /^https:\/\//.test(raw.thumbnail) ? raw.thumbnail.slice(0, 500) : null;
+  const kind = classifyInput(url);
+  if (source === 'youtube') {
+    const videoId = kind.kind === 'youtube' ? extractYouTubeVideoId(url) : null;
+    return videoId ? { ...youtubeTrack(videoId, title, duration), thumbnail: thumbnail ?? youtubeTrack(videoId, title).thumbnail } : null;
+  }
+  if (source === 'spotify') {
+    return kind.kind === 'spotify' && kind.type === 'track'
+      ? { source, key: `sp:${kind.id}`, title, url: `https://open.spotify.com/track/${kind.id}`, duration, thumbnail }
+      : null;
+  }
+  const key = typeof raw.key === 'string' && /^sc:[^\s]{1,500}$/.test(raw.key) ? raw.key : null;
+  return kind.kind === 'soundcloud' && key ? { source: 'soundcloud', key, title, url, duration, thumbnail } : null;
 }
 
 function readActorName(session: { name?: string | null } | null, localMode: boolean): string {
@@ -321,150 +387,48 @@ function readActorName(session: { name?: string | null } | null, localMode: bool
   return localMode ? 'Paikallinen tila' : 'Web käyttäjä';
 }
 
+function readSessionUserId(session: { email?: string | null } | null): string | null {
+  const email = session?.email || '';
+  return email.startsWith('discord:') ? email.slice('discord:'.length) : null;
+}
+
+function webUsageContext(
+  req: http.IncomingMessage,
+  session: { email?: string | null; name?: string | null; isAdmin?: boolean; guildId?: string | null } | null,
+  localMode: boolean,
+  trustProxy: boolean,
+  guildId?: string | null
+): UsageLogFields {
+  return {
+    source: 'web',
+    actor: readActorName(session, localMode),
+    userId: readSessionUserId(session),
+    guildId: guildId ?? session?.guildId ?? null,
+    localMode,
+    isAdmin: session?.isAdmin ?? false,
+    clientIp: getClientIpForRateLimit(req, trustProxy),
+  };
+}
+
+function queueUsageMetrics(queue: any): UsageLogFields {
+  if (!queue) return { queuePresent: false };
+  const currentSong = queue.getCurrentSong?.();
+  return {
+    queuePresent: true,
+    currentTitle: currentSong?.title ?? null,
+    currentUrl: currentSong?.url ?? null,
+    queuedCount: queue.getQueue?.().length ?? 0,
+    hasNextSong: queue.hasNextSong?.() ?? false,
+    paused: queue.isPausedState?.() ?? false,
+    playerState: queue.getPlayer?.().state?.status ?? null,
+  };
+}
+
 function mergeBulkResult(base: BulkAddResult, extra: BulkAddResult): BulkAddResult {
   return {
     added: base.added + extra.added,
     skippedDuplicates: base.skippedDuplicates + extra.skippedDuplicates,
     failed: base.failed + extra.failed,
-  };
-}
-
-type VoiceCommandIntent = 'play' | 'skip' | 'pause' | 'resume' | 'unknown';
-
-interface VoiceCommandParseResult {
-  intent: VoiceCommandIntent;
-  query: string;
-}
-
-interface VoiceCommandResult {
-  ok: boolean;
-  status: number;
-  intent: VoiceCommandIntent;
-  message: string;
-  queuedTitle?: string;
-  resolvedUrl?: string;
-  error?: string;
-}
-
-function normalizeVoiceTranscript(raw: string): string {
-  return raw
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s:/?&=._-]+/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function parseVoiceCommand(transcript: string): VoiceCommandParseResult {
-  const normalized = normalizeVoiceTranscript(transcript);
-  const wakeless = normalized.startsWith('eppu ') ? normalized.slice(5).trim() : normalized;
-
-  if (/^(ohita|skip|seuraava)\b/.test(wakeless)) {
-    return { intent: 'skip', query: '' };
-  }
-  if (/^(tauko|pause|pysayta|pysäytä)\b/.test(wakeless)) {
-    return { intent: 'pause', query: '' };
-  }
-  if (/^(jatka|resume)\b/.test(wakeless)) {
-    return { intent: 'resume', query: '' };
-  }
-
-  const playMatch = wakeless.match(/^soita\s+(.+)$/);
-  if (playMatch) {
-    return { intent: 'play', query: playMatch[1].trim() };
-  }
-  return { intent: 'unknown', query: wakeless };
-}
-
-async function executeVoiceCommand(
-  client: Client,
-  guildId: string,
-  requestedBy: string,
-  transcript: string,
-  voiceKeywordMap: Record<string, string>
-): Promise<VoiceCommandResult> {
-  const parsed = parseVoiceCommand(transcript);
-  const queue = queues.get(guildId);
-
-  if (parsed.intent === 'skip') {
-    if (!queue) {
-      return { ok: false, status: 404, intent: parsed.intent, message: 'Jonossa ei ole ohitettavaa.', error: 'No queue' };
-    }
-    queue.skip();
-    return { ok: true, status: 200, intent: parsed.intent, message: 'Ohitettiin nykyinen kappale.' };
-  }
-
-  if (parsed.intent === 'pause') {
-    if (!queue) {
-      return { ok: false, status: 404, intent: parsed.intent, message: 'Jonossa ei ole tauotettavaa.', error: 'No queue' };
-    }
-    queue.pause();
-    return { ok: true, status: 200, intent: parsed.intent, message: 'Tauko päälle.' };
-  }
-
-  if (parsed.intent === 'resume') {
-    if (!queue) {
-      return { ok: false, status: 404, intent: parsed.intent, message: 'Jonossa ei ole jatkettavaa.', error: 'No queue' };
-    }
-    queue.resume();
-    return { ok: true, status: 200, intent: parsed.intent, message: 'Toisto jatkuu.' };
-  }
-
-  if (parsed.intent !== 'play' || !parsed.query) {
-    return {
-      ok: false,
-      status: 400,
-      intent: parsed.intent,
-      message: 'Komentoa ei tunnistettu. Sano esimerkiksi: "Eppu soita 22".',
-      error: 'Unknown command',
-    };
-  }
-
-  const queryKey = normalizeVoiceKeyword(parsed.query);
-  const keywordUrl = voiceKeywordMap[queryKey];
-  let resolvedUrl = keywordUrl;
-  let resolvedTitle: string | undefined;
-
-  if (!resolvedUrl) {
-    const explicitId = extractYouTubeVideoId(parsed.query);
-    if (explicitId) {
-      resolvedUrl = canonicalYouTubeUrl(explicitId);
-    }
-  }
-
-  if (!resolvedUrl) {
-    const search = await searchYouTubeFromWeb(parsed.query, 1);
-    if (!search.success || !search.results?.length) {
-      return {
-        ok: false,
-        status: 404,
-        intent: parsed.intent,
-        message: `Hakua ei löytynyt komennolle: "${parsed.query}"`,
-        error: search.error || 'No search results',
-      };
-    }
-    resolvedUrl = search.results[0].url;
-    resolvedTitle = search.results[0].title;
-  }
-
-  const added = await addSongFromWeb(client, guildId, resolvedUrl, requestedBy, resolvedTitle ? { resolvedTitle } : undefined);
-  if (!added.success) {
-    return {
-      ok: false,
-      status: 500,
-      intent: parsed.intent,
-      message: added.error || 'Kappaleen lisäys epäonnistui.',
-      error: added.error || 'Failed to queue song',
-      resolvedUrl,
-    };
-  }
-
-  return {
-    ok: true,
-    status: 200,
-    intent: parsed.intent,
-    message: `Lisättiin jonoon: ${resolvedTitle || parsed.query}`,
-    queuedTitle: resolvedTitle || parsed.query,
-    resolvedUrl,
   };
 }
 
@@ -583,11 +547,11 @@ export function startWebServer(client: Client) {
   const port = parseInt(process.env.WEB_PORT || '3000', 10);
   const localMode = envBool(process.env.WEB_LOCAL_MODE, false);
   const exposureMode: ExposureMode = process.env.WEB_EXPOSURE_MODE === 'tunnel' ? 'tunnel' : 'local';
-  const secureCookie = envBool(process.env.WEB_COOKIE_SECURE, exposureMode === 'tunnel');
+  const secureCookie = resolveSecureCookieDefault(exposureMode);
   const trustProxy = envBool(process.env.WEB_TRUST_PROXY, false);
   const sessionCookieMaxAgeSeconds = Math.max(
     60,
-    Math.floor((parseInt(process.env.WEB_SESSION_TTL_MS || '86400000', 10) || 86_400_000) / 1000)
+    Math.floor((parseInt(process.env.WEB_SESSION_TTL_MS || '2592000000', 10) || 2_592_000_000) / 1000)
   );
   const requireAccessToken = envBool(process.env.WEB_REQUIRE_TOKEN, false);
   const accessToken = process.env.WEB_ACCESS_TOKEN?.trim() || '';
@@ -615,7 +579,7 @@ export function startWebServer(client: Client) {
     const method = req.method || 'GET';
 
     applySecurityHeaders(res);
-    const originAllowed = applyCorsHeaders(req, res, exposureMode, allowedOrigins);
+    const originAllowed = applyCorsHeaders(req, res, exposureMode, allowedOrigins, trustProxy);
     if (method === 'OPTIONS') {
       if (!originAllowed) {
         json(res, { error: 'Origin not allowed' }, 403);
@@ -765,7 +729,7 @@ export function startWebServer(client: Client) {
             const includeCurrent = body?.includeCurrent !== false;
             const hasSelectedIndices = Array.isArray(body?.selectedIndices);
             const selectedIndices = parseIndexList(body?.selectedIndices);
-            const selected = queueSelectionToPlaylistInputs(
+            const selected = queueSelectionToTracks(
               guildId,
               includeCurrent,
               hasSelectedIndices ? selectedIndices : null
@@ -790,30 +754,26 @@ export function startWebServer(client: Client) {
             return;
           }
 
-          if (parts.length === 3 && baseId === 'import-youtube' && method === 'POST') {
+          if (parts.length === 3 && baseId === 'import' && method === 'POST') {
             const body = JSON.parse(await readBody(req));
             const sourceUrl = toOptionalString(body?.url);
             const preferredName = toOptionalString(body?.name);
             if (!sourceUrl) {
-              json(res, { error: 'url required' }, 400);
+              json(res, { error: 'Liitä soittolistan, albumin tai kappaleen linkki.' }, 400);
               return;
             }
             const startedAt = Date.now();
             console.log(`[playlist] import begin url=${sourceUrl}`);
-            const imported = await resolveYouTubePlaylistSongs(sourceUrl);
-            if (imported.songs.length === 0) {
-              json(res, { error: 'No songs found in YouTube playlist' }, 400);
-              return;
-            }
-            const name = preferredName || imported.sourceTitle || `YouTube tuonti ${new Date().toISOString().slice(0, 10)}`;
+            const imported = await resolveInput(sourceUrl);
+            const name = preferredName || imported.name || imported.tracks[0]?.title || `Tuonti ${new Date().toISOString().slice(0, 10)}`;
             const created = await createPlaylist(name, actor);
-            const result = await addSongsToPlaylist(created.id, imported.songs, actor);
+            const result = await addSongsToPlaylist(created.id, imported.tracks, actor);
             console.log(
-              `[playlist] import done id=${created.id} songs=${imported.songs.length} `
-              + `added=${result.added} skipped=${result.skippedDuplicates} failed=${result.failed} `
+              `[playlist] import done id=${created.id} songs=${imported.tracks.length} skipped=${imported.skipped} `
+              + `added=${result.added} duplicates=${result.skippedDuplicates} failed=${result.failed} `
               + `in ${Date.now() - startedAt}ms`
             );
-            json(res, { ok: true, playlist: created, sourceTitle: imported.sourceTitle, result });
+            json(res, { ok: true, playlist: created, result: { ...result, failed: result.failed + imported.skipped } });
             return;
           }
 
@@ -875,7 +835,7 @@ export function startWebServer(client: Client) {
             const includeCurrent = body?.includeCurrent !== false;
             const hasSelectedIndices = Array.isArray(body?.selectedIndices);
             const selectedIndices = parseIndexList(body?.selectedIndices);
-            const selected = queueSelectionToPlaylistInputs(
+            const selected = queueSelectionToTracks(
               guildId,
               includeCurrent,
               hasSelectedIndices ? selectedIndices : null
@@ -917,75 +877,45 @@ export function startWebServer(client: Client) {
             }
             const songs = await getAllPlaylistSongs(baseId);
             if (!songs.length) {
-              json(res, { ok: true, noop: true, message: 'Playlist is empty' });
+              json(res, { ok: true, noop: true, message: 'Soittolista on tyhjä.' });
               return;
             }
             const order = body?.shuffle ? shuffleArray(songs) : songs;
-            let queued = 0;
-            let failed = 0;
-            let firstError = '';
-            for (const song of order) {
-              const result = await addSongFromWeb(client, guildId, song.url, actor, { resolvedTitle: song.title });
-              if (result.success) {
-                queued += 1;
-              } else {
-                failed += 1;
-                if (!firstError && result.error) firstError = result.error;
-              }
-            }
+            const result = await enqueueFromWeb(client, guildId, { tracks: order }, actor, 'web_playlist');
             console.log(
-              `[playlist] play id=${baseId} guild=${guildId} shuffle=${!!body?.shuffle} `
-              + `queued=${queued} failed=${failed}`
+              `[playlist] play id=${baseId} guild=${guildId} shuffle=${!!body?.shuffle} queued=${result.added} ok=${result.success}`
             );
-            json(res, { ok: queued > 0, queued, failed, error: queued > 0 ? undefined : (firstError || 'Failed to queue playlist') });
+            logUsage('playlist.play', {
+              ...webUsageContext(req, session, localMode, trustProxy, guildId),
+              playlistId: baseId,
+              shuffle: !!body?.shuffle,
+              requestedCount: order.length,
+              queued: result.added,
+              ok: result.success,
+            });
+            json(res, result.success ? { ok: true, queued: result.added } : { error: result.error });
             return;
           }
 
           if (parts.length === 4 && parts[3] === 'songs' && method === 'POST') {
             const body = JSON.parse(await readBody(req));
-            const url = toOptionalString(body?.url);
-            if (!url) {
-              json(res, { error: 'url required' }, 400);
+            const track = body?.track !== undefined ? parseClientTrack(body.track) : null;
+            const input = toOptionalString(body?.input) || toOptionalString(body?.url);
+            if (body?.track !== undefined && !track) {
+              json(res, { error: 'Kappaleen tiedot olivat virheelliset.' }, 400);
               return;
             }
-            const resolved = await resolveYouTubeSong(url);
-            const result = await addSongsToPlaylist(baseId, [resolved], actor);
+            if (!track && !input) {
+              json(res, { error: 'Liitä linkki tai kirjoita hakusana.' }, 400);
+              return;
+            }
+            const resolved = track ? { tracks: [track], skipped: 0 } : await resolveInput(input as string);
+            const result = await addSongsToPlaylist(baseId, resolved.tracks, actor);
             console.log(
               `[playlist] song-add id=${baseId} added=${result.added} `
-              + `skipped=${result.skippedDuplicates} failed=${result.failed}`
+              + `duplicates=${result.skippedDuplicates} failed=${result.failed} skipped=${resolved.skipped}`
             );
-            json(res, { ok: true, result, song: resolved });
-            return;
-          }
-
-          if (parts.length === 5 && parts[3] === 'songs' && parts[4] === 'bulk' && method === 'POST') {
-            const body = JSON.parse(await readBody(req));
-            const urls = Array.isArray(body?.urls)
-              ? body.urls.map((value: unknown) => String(value).trim()).filter((value: string) => value.length > 0)
-              : [];
-            if (!urls.length) {
-              json(res, { error: 'urls required' }, 400);
-              return;
-            }
-            const startedAt = Date.now();
-            let failedResolve = 0;
-            const resolvedSongs: Array<{ title: string; url: string; canonicalVideoId: string }> = [];
-            for (const url of urls) {
-              try {
-                const song = await resolveYouTubeSong(url);
-                resolvedSongs.push(song);
-              } catch {
-                failedResolve += 1;
-              }
-            }
-            const addResult = await addSongsToPlaylist(baseId, resolvedSongs, actor);
-            const result = mergeBulkResult(addResult, { added: 0, skippedDuplicates: 0, failed: failedResolve });
-            console.log(
-              `[playlist] song-bulk id=${baseId} requested=${urls.length} resolved=${resolvedSongs.length} `
-              + `added=${result.added} skipped=${result.skippedDuplicates} failed=${result.failed} `
-              + `in ${Date.now() - startedAt}ms`
-            );
-            json(res, { ok: true, result });
+            json(res, { ok: true, result: { ...result, failed: result.failed + resolved.skipped } });
             return;
           }
 
@@ -1026,6 +956,10 @@ export function startWebServer(client: Client) {
           }
           if (error instanceof PlaylistNotFoundError) {
             json(res, { error: error.message }, 404);
+            return;
+          }
+          if (error instanceof ResolveError) {
+            json(res, { error: error.message }, 422);
             return;
           }
           console.error('[playlist] API error:', error);
@@ -1127,7 +1061,8 @@ export function startWebServer(client: Client) {
             currentSong: queue?.getCurrentSong() ?? null,
             queue: queue?.getQueue() ?? [],
             paused: queue?.isPausedState() ?? false,
-            volume: getVolume(guild.id)
+            volume: getVolume(guild.id),
+            positionMs: getPlaybackPositionMs(guild.id),
           };
           return true;
         };
@@ -1195,6 +1130,18 @@ export function startWebServer(client: Client) {
             + `status=${result.status} in ${Date.now() - startedAt}ms `
             + `${result.resolvedUrl ? `url=${result.resolvedUrl}` : ''}`
           );
+          logUsage('voice.command', {
+            ...webUsageContext(req, session, localMode, trustProxy, guildId),
+            source: 'web_voice_debug',
+            transcript,
+            intent: result.intent,
+            ok: result.ok,
+            status: result.status,
+            message: result.message,
+            queuedTitle: result.queuedTitle,
+            resolvedUrl: result.resolvedUrl,
+            durationMs: Date.now() - startedAt,
+          });
           if (!result.ok) {
             json(
               res,
@@ -1215,14 +1162,29 @@ export function startWebServer(client: Client) {
         }
 
         if (pathname === '/api/search') {
-          const query = typeof body.query === 'string' ? body.query : '';
-          const limit = Number.isFinite(body.limit) ? body.limit : 6;
-          if (!query.trim()) {
-            json(res, { error: 'query required' }, 400);
+          const query = typeof body.query === 'string' ? body.query.trim() : '';
+          const source = body.source === 'soundcloud' ? 'soundcloud' : 'youtube';
+          const limit = asNumber(body.limit, 8, 1, 10);
+          if (!query) {
+            json(res, { error: 'Kirjoita hakusana.' }, 400);
             return;
           }
-          const result = await searchYouTubeFromWeb(query, limit);
-          json(res, result.success ? { ok: true, results: result.results } : { error: result.error });
+          const startedAt = Date.now();
+          try {
+            const results = await searchTracks(query, source, limit);
+            logUsage('web.search', {
+              ...webUsageContext(req, session, localMode, trustProxy),
+              query, searchSource: source, ok: true, resultCount: results.length, durationMs: Date.now() - startedAt,
+            });
+            json(res, { ok: true, results });
+          } catch (error) {
+            console.error(`[search] failed source=${source} query="${query}"`, error);
+            logUsage('web.search', {
+              ...webUsageContext(req, session, localMode, trustProxy),
+              query, searchSource: source, ok: false, error, durationMs: Date.now() - startedAt,
+            });
+            json(res, { error: 'Haku epäonnistui. Yritä hetken päästä uudelleen.' }, 502);
+          }
           return;
         }
 
@@ -1242,42 +1204,140 @@ export function startWebServer(client: Client) {
 
         switch (pathname) {
           case '/api/play': {
-            if (!body.url) { json(res, { error: 'url required' }, 400); return; }
+            // Either a known track (search result) or free input: a link or search text.
+            const track = body.track !== undefined ? parseClientTrack(body.track) : null;
+            const input = toOptionalString(body.input) || toOptionalString(body.url);
+            if (!track && !input) { json(res, { error: 'Liitä linkki tai kirjoita hakusana.' }, 400); return; }
             const requestedBy = session?.name || 'Local Web';
-            const result = await addSongFromWeb(client, guildId, body.url, requestedBy);
-            json(res, result.success ? { ok: true } : { error: result.error });
+            const result = await enqueueFromWeb(
+              client, guildId, track ? { tracks: [track] } : { input: input as string }, requestedBy, 'web'
+            );
+            logUsage('web.play', {
+              ...webUsageContext(req, session, localMode, trustProxy, guildId),
+              url: track?.url ?? input,
+              ok: result.success,
+              added: result.added,
+              error: result.error,
+            });
+            json(res, result.success
+              ? { ok: true, added: result.added, skipped: result.skipped, name: result.name, firstTitle: result.firstTitle }
+              : { error: result.error }, result.success ? 200 : 422);
             return;
           }
           case '/api/skip':
-            if (!queue) { json(res, { error: 'No queue' }, 404); return; }
+            if (!queue) {
+              logUsage('queue.skip', {
+                ...webUsageContext(req, session, localMode, trustProxy, guildId),
+                ok: false,
+                reason: 'no_queue',
+              });
+              json(res, { error: 'No queue' }, 404);
+              return;
+            }
+            const skippedSong = queue.getCurrentSong();
             queue.skip();
+            logUsage('queue.skip', {
+              ...webUsageContext(req, session, localMode, trustProxy, guildId),
+              ok: true,
+              skippedTitle: skippedSong?.title ?? null,
+              skippedUrl: skippedSong?.url ?? null,
+              ...queueUsageMetrics(queue),
+            });
             json(res, { ok: true });
             return;
           case '/api/pause':
-            if (!queue) { json(res, { error: 'No queue' }, 404); return; }
+            if (!queue) {
+              logUsage('queue.pause', {
+                ...webUsageContext(req, session, localMode, trustProxy, guildId),
+                ok: false,
+                reason: 'no_queue',
+              });
+              json(res, { error: 'No queue' }, 404);
+              return;
+            }
             if (queue.isPausedState()) { queue.resume(); } else { queue.pause(); }
+            logUsage(queue.isPausedState() ? 'queue.pause' : 'queue.resume', {
+              ...webUsageContext(req, session, localMode, trustProxy, guildId),
+              ok: true,
+              ...queueUsageMetrics(queue),
+            });
             json(res, { ok: true, paused: queue.isPausedState() });
             return;
           case '/api/remove':
-            if (!queue) { json(res, { error: 'No queue' }, 404); return; }
+            if (!queue) {
+              logUsage('queue.remove', {
+                ...webUsageContext(req, session, localMode, trustProxy, guildId),
+                ok: false,
+                reason: 'no_queue',
+                index: body.index,
+              });
+              json(res, { error: 'No queue' }, 404);
+              return;
+            }
+            const removedSong = queue.getQueue()[body.index];
             if (queue.removeSong(body.index)) {
               refreshNextSongPrefetch(client, guildId);
+              logUsage('queue.remove', {
+                ...webUsageContext(req, session, localMode, trustProxy, guildId),
+                ok: true,
+                index: body.index,
+                removedTitle: removedSong?.title ?? null,
+                removedUrl: removedSong?.url ?? null,
+                ...queueUsageMetrics(queue),
+              });
               json(res, { ok: true });
             } else {
+              logUsage('queue.remove', {
+                ...webUsageContext(req, session, localMode, trustProxy, guildId),
+                ok: false,
+                index: body.index,
+                reason: 'invalid_index',
+                ...queueUsageMetrics(queue),
+              });
               json(res, { error: 'Invalid index' });
             }
             return;
           case '/api/move':
-            if (!queue) { json(res, { error: 'No queue' }, 404); return; }
+            if (!queue) {
+              logUsage('queue.move', {
+                ...webUsageContext(req, session, localMode, trustProxy, guildId),
+                ok: false,
+                reason: 'no_queue',
+                from: body.from,
+                to: body.to,
+              });
+              json(res, { error: 'No queue' }, 404);
+              return;
+            }
             if (queue.moveSong(body.from, body.to)) {
               refreshNextSongPrefetch(client, guildId);
+              logUsage('queue.move', {
+                ...webUsageContext(req, session, localMode, trustProxy, guildId),
+                ok: true,
+                from: body.from,
+                to: body.to,
+                ...queueUsageMetrics(queue),
+              });
               json(res, { ok: true });
             } else {
+              logUsage('queue.move', {
+                ...webUsageContext(req, session, localMode, trustProxy, guildId),
+                ok: false,
+                from: body.from,
+                to: body.to,
+                reason: 'invalid_indices',
+                ...queueUsageMetrics(queue),
+              });
               json(res, { error: 'Invalid indices' });
             }
             return;
           case '/api/volume':
             setVolume(guildId, body.volume);
+            logUsage('queue.volume', {
+              ...webUsageContext(req, session, localMode, trustProxy, guildId),
+              requestedVolume: body.volume,
+              volume: getVolume(guildId),
+            });
             json(res, { ok: true, volume: getVolume(guildId) });
             return;
         }

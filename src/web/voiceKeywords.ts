@@ -1,6 +1,6 @@
 import path from 'path';
 import sqlite3 from 'sqlite3';
-import { canonicalYouTubeUrl, extractYouTubeVideoId } from './playlists';
+import { extractYouTubeVideoId, youtubeTrack } from '../music/sources';
 
 const AUTH_DB_PATH = process.env.WEB_AUTH_DB_PATH?.trim() || path.join(__dirname, '../../web-auth.db');
 const db = new sqlite3.Database(AUTH_DB_PATH);
@@ -105,7 +105,7 @@ function canonicalizeUrl(url: string): { canonicalVideoId: string; canonicalUrl:
   }
   return {
     canonicalVideoId,
-    canonicalUrl: canonicalYouTubeUrl(canonicalVideoId),
+    canonicalUrl: youtubeTrack(canonicalVideoId, '').url,
   };
 }
 

@@ -1,194 +1,119 @@
-# Finnish Voice Commands for Eppu Music Bot
+# Discord Voice Commands
 
-This document describes the Finnish voice command system for the Eppu Discord music bot.
+Eppu listens to Discord voice-channel audio only. The Raspberry Pi does not need a microphone, and **everything runs locally** — wake word detection (openWakeWord) and speech recognition (faster-whisper) both run on the Pi with no external services.
 
-## Features
+## Flow
 
-- **Wake Word Detection**: Say "Hei Eppu" to activate voice commands
-- **Finnish Language Support**: All commands in Finnish
-- **Local Processing**: Wake word detection runs locally on Raspberry Pi
-- **GPT-Realtime Integration**: Advanced speech recognition and command parsing
-- **Favorites System**: Save and play favorite songs
-- **Search Functionality**: Search for songs by name or artist
-- **Voice Feedback**: Bot responds with Finnish voice messages
-
-## Setup
-
-### Prerequisites
-
-1. **Raspberry Pi** with audio input/output
-2. **Discord Bot Token**
-3. **OpenAI API Key** (for GPT-realtime)
-4. **Picovoice Access Key** (for wake word detection)
-
-### Installation
-
-1. Run the setup script:
-```bash
-chmod +x setup-voice-commands.sh
-./setup-voice-commands.sh
+```text
+Discord voice channel
+  -> @discordjs/voice receiver
+  -> Opus decode
+  -> 16 kHz mono WAV segment
+  -> persistent local voice worker (scripts/voice_worker.py)
+       wake engine 'openwakeword': score segment with local "Hei Eppu" model,
+                                   transcribe locally only after a wake hit
+       wake engine 'transcript':   transcribe every segment locally, accept if
+                                   the text starts with "Hei Eppu"
+  -> Eppu command executor
 ```
 
-2. Edit `.env` file with your API keys:
+The bot must be connected to the voice channel and must join with `selfDeaf: false`, otherwise Discord does not send incoming audio to the receiver.
+When `VOICE_COMMANDS_ENABLED` or `VOICE_SAMPLE_COLLECTION_ENABLED` is true, Eppu auto-joins `DEFAULT_VOICE_CHANNEL_ID` at startup for listening.
+
+## Environment
+
 ```env
-DISCORD_TOKEN=your_discord_bot_token
-OPENAI_API_KEY=your_openai_api_key
-PICOVOICE_ACCESS_KEY=your_picovoice_access_key
+VOICE_COMMANDS_ENABLED=true
+VOICE_PYTHON=/path/to/eppu-normaali/.venv-voice/bin/python
+
+# Wake word — 'openwakeword' (trained model, light on CPU) or 'transcript'
+# (no model needed; transcribes everything locally, heavier). Defaults to
+# openwakeword when a model path is set, transcript otherwise.
+#VOICE_WAKE_ENGINE=openwakeword
+OPENWAKEWORD_MODEL_PATH=/path/to/eppu-normaali/models/hei-eppu.onnx
+OPENWAKEWORD_THRESHOLD=0.55
+# Optional precision booster trained from real clips (training/train_verifier.py):
+#OPENWAKEWORD_VERIFIER_PATH=/path/to/eppu-normaali/models/hei-eppu-verifier.pkl
+#OPENWAKEWORD_VERIFIER_THRESHOLD=0.3
+
+# Local transcription (faster-whisper, multilingual — handles Finnish).
+VOICE_STT_ENGINE=local        # 'openai' still works as a legacy fallback
+VOICE_WHISPER_MODEL=base      # tiny = fastest, small = most accurate on a Pi
+VOICE_LANGUAGE=fi
+
+VOICE_SEGMENT_SILENCE_MS=900
+VOICE_MAX_SEGMENT_SECONDS=8
+VOICE_COMMAND_COOLDOWN_MS=3000
+
+VOICE_GUILD_ID=your_guild_id
+DEFAULT_VOICE_CHANNEL_ID=your_voice_channel_id
 ```
 
-3. Test audio setup:
-```bash
-# Test microphone
-arecord -f S16_LE -r 16000 -c 1 -D plughw:1,0 test.wav
+`OPENWAKEWORD_MODEL_PATH` must point to a trained openWakeWord model for the phrase `Hei Eppu`. Train it locally on a bigger computer with the pipeline in `training/` (see `training/README.md`). Until a model is trained, set `VOICE_WAKE_ENGINE=transcript` to run fully local voice commands without one.
 
-# Test speakers
-aplay test.wav
-```
+Setup installs openWakeWord 0.6.0 with ONNX dependencies only, avoiding the
+TFLite wheel limitation on newer Raspberry Pi Python versions. Use an `.onnx`
+wake model with this setup.
 
-4. Start the bot:
-```bash
-npm start
-```
-
-## Voice Commands
-
-### Basic Music Controls
-
-| Finnish Command | English | Action |
-|----------------|---------|--------|
-| "Hei Eppu, toista [kappale]" | "Hei Eppu, play [song]" | Play a song |
-| "Hei Eppu, tauko" | "Hei Eppu, pause" | Pause music |
-| "Hei Eppu, jatka" | "Hei Eppu, resume" | Resume music |
-| "Hei Eppu, seuraava" | "Hei Eppu, next" | Skip to next song |
-| "Hei Eppu, lopeta" | "Hei Eppu, stop" | Stop music |
-| "Hei Eppu, jono" | "Hei Eppu, queue" | Show music queue |
-
-### Favorites System
-
-| Finnish Command | English | Action |
-|----------------|---------|--------|
-| "Hei Eppu, lisää suosikkeihin" | "Hei Eppu, add to favorites" | Add current song to favorites |
-| "Hei Eppu, toista suosikit" | "Hei Eppu, play favorites" | Play favorites playlist |
-| "Hei Eppu, näytä suosikit" | "Hei Eppu, show favorites" | Show favorites list |
-
-### Search Commands
-
-| Finnish Command | English | Action |
-|----------------|---------|--------|
-| "Hei Eppu, etsi [kappale]" | "Hei Eppu, search [song]" | Search and play song |
-| "Hei Eppu, hae [artisti]" | "Hei Eppu, find [artist]" | Search by artist |
-
-### Volume Control
-
-| Finnish Command | English | Action |
-|----------------|---------|--------|
-| "Hei Eppu, äänenvoimakkuus ylös" | "Hei Eppu, volume up" | Increase volume |
-| "Hei Eppu, äänenvoimakkuus alas" | "Hei Eppu, volume down" | Decrease volume |
-
-### Help
-
-| Finnish Command | English | Action |
-|----------------|---------|--------|
-| "Hei Eppu, apua" | "Hei Eppu, help" | Show help message |
-
-## Technical Details
-
-### Architecture
-
-```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   Wake Word     │───▶│  GPT-Realtime    │───▶│  Command Parser │
-│  (Porcupine)    │    │  (Finnish STT)   │    │  (Finnish NLP)  │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-         │                        │                        │
-         ▼                        ▼                        ▼
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│  Local Audio    │    │  OpenAI API      │    │  Music Bot      │
-│  Processing     │    │  Integration     │    │  Commands       │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-```
-
-### Components
-
-1. **WakeWordDetector**: Local wake word detection using Porcupine (phrase "Hei Eppu")
-2. **GPTRealtimeHandler**: OpenAI integration for speech recognition
-3. **FinnishCommandParser**: Natural language processing for Finnish
-4. **VoiceFeedback**: Text-to-speech responses in Finnish
-5. **FavoritesManager**: SQLite database for user favorites
-6. **MusicSearch**: YouTube search integration
-
-### Audio Configuration
-
-The system uses ALSA for audio capture on Raspberry Pi:
+## Setup On Pi
 
 ```bash
-# Audio device configuration
-AUDIO_DEVICE=plughw:1,0  # Adjust for your Pi's audio setup
-
-# Audio format
-Sample Rate: 16kHz
-Channels: Mono
-Format: 16-bit signed little endian
+cd /path/to/eppu-normaali
+./setup-voice-commands.sh     # installs openwakeword + faster-whisper, caches the whisper model
+sudo systemctl restart eppu
+journalctl -u eppu -f
 ```
 
-### Performance Optimization
+## Commands
 
-- **Local Wake Word**: Reduces latency and API costs
-- **Audio Buffering**: Efficient memory usage
-- **Command Caching**: Reduces repeated API calls
-- **Raspberry Pi Optimized**: Lightweight dependencies
+Wake phrase: `Hei Eppu`
 
-## Troubleshooting
+Commands work in Finnish or English. Spoken Finnish numbers are converted to digits ("soita kaksikymmentäkaksi" → keyword `22`), and saved keywords match fuzzily, so small transcription errors still resolve.
 
-### Common Issues
+| Spoken command | Action |
+| --- | --- |
+| `Hei Eppu soita 22` | Queue the saved keyword `22` |
+| `Hei Eppu soita kaksikymmentäkaksi` | Same — number words become digits |
+| `Hei Eppu ohita` | Skip current song |
+| `Hei Eppu tauko` | Pause playback |
+| `Hei Eppu jatka` | Resume playback |
+| `Hei Eppu soita Eppu Normaali` | Search YouTube and queue a result |
+| `Hei Eppu play Metallica` | Search YouTube and queue a result |
+| `Hei Eppu skip` / `pause` / `resume` | English equivalents |
 
-1. **No Audio Input**
-   - Check microphone permissions: `sudo usermod -a -G audio $USER`
-   - Test audio device: `arecord -l`
-   - Adjust AUDIO_DEVICE in .env
+Keywords (presets) are managed on the bot's website: the Voice keywords section saves a phrase → YouTube URL mapping that voice commands resolve before falling back to search.
 
-2. **Wake Word Not Detected**
-   - Check Picovoice API key
-   - Ensure microphone is working
-   - Adjust wake word sensitivity
+## Tuning
 
-3. **Commands Not Understood**
-   - Check OpenAI API key
-   - Ensure clear pronunciation
-   - Check internet connection
+- Raise `OPENWAKEWORD_THRESHOLD` if Eppu wakes too often; lower it if `Hei Eppu` is missed.
+- Train and enable a verifier (`OPENWAKEWORD_VERIFIER_PATH`) if false activations persist — it locks detection to known voices.
+- `VOICE_WHISPER_MODEL=tiny` if transcription is too slow on the Pi; `small` if Finnish accuracy is poor (slower).
+- Increase `VOICE_SEGMENT_SILENCE_MS` if commands get cut off before transcription.
+- Increase `VOICE_MAX_SEGMENT_SECONDS` if longer song requests are truncated.
+- Set `VOICE_DEBUG=true` to log wake misses, scores, and voice worker stderr.
 
-4. **High CPU Usage**
-   - Reduce audio quality settings
-   - Disable voice feedback temporarily
-   - Check for background processes
+## Collecting Training Samples
 
-### Debug Mode
+Real samples recorded through the Discord audio path are the most valuable wake word training data. To collect WAV samples on the Pi, temporarily enable:
 
-Enable debug logging in `.env`:
 ```env
-VOICE_DEBUG=true
-LOG_LEVEL=debug
+VOICE_COMMANDS_ENABLED=false
+VOICE_SAMPLE_COLLECTION_ENABLED=true
+VOICE_SAMPLE_COLLECTION_DIR=/path/to/eppu-normaali/voice-samples/positive
+VOICE_SAMPLE_COLLECTION_LABEL=positive
 ```
 
-### Audio Testing
+Then make Eppu join the voice channel and say the wake phrase plus short commands, for example `Hei Eppu soita 22`. The receiver stores 16 kHz mono WAV segments in `VOICE_SAMPLE_COLLECTION_DIR`.
 
-```bash
-# Test microphone
-arecord -f S16_LE -r 16000 -c 1 -D plughw:1,0 -d 5 test.wav
+Use a separate directory and label for negative samples (normal conversation **without** the wake phrase):
 
-# Test speakers
-aplay test.wav
-
-# Test espeak-ng
-espeak-ng -v fi "Hei, tämä on testi"
+```env
+VOICE_SAMPLE_COLLECTION_DIR=/path/to/eppu-normaali/voice-samples/negative
+VOICE_SAMPLE_COLLECTION_LABEL=negative
 ```
 
-## API Keys Required
+Disable sample collection after recording. It intentionally saves voice-channel speech segments while enabled. Copy the samples to the training machine (`rsync -av pi:/path/to/eppu-normaali/voice-samples/ voice-samples/`) and follow `training/README.md`.
 
-1. **Discord Bot Token**: Create at https://discord.com/developers/applications
-2. **OpenAI API Key**: Get at https://platform.openai.com/api-keys
-3. **Picovoice Access Key**: Get at https://console.picovoice.ai/
+## Privacy Boundary
 
-## License
-
-This voice command system is part of the Eppu music bot project.
+All audio stays on the Pi. Speech segments are decoded into short temporary WAV files, scored/transcribed by the local voice worker, and deleted. Nothing is sent to any external service (unless you explicitly opt into the legacy `VOICE_STT_ENGINE=openai`).

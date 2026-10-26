@@ -1,0 +1,5 @@
+# torch-audiomentations 0.12 requires torchaudio.info (removed in 2.9).
+# Keep Torch and TorchAudio on the matching release, including later installs.
+torch==2.8.0
+torchaudio==2.8.0
+torch-audiomentations==0.12.0

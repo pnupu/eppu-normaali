@@ -1,8 +1,7 @@
-import { ToastMood } from './types';
+import type { ToastMood } from './types';
 
 export const POLL_FAST_MS = 3000;
 export const POLL_SLOW_MS = 10000;
-export const SEARCH_RESULT_LIMIT = 6;
 export const TOAST_MS = 4200;
 
 export const TOAST_IMAGES: Record<ToastMood, readonly string[]> = Object.freeze({
@@ -15,7 +14,7 @@ export const TOAST_LINES = Object.freeze({
   searchError: [
     'Eppu sanoo: tästä hausta ei löytynyt mitään.',
     'Eppu ei vakuuttunut. Kokeile toista hakua.',
-    'Eppu tuijotti YouTubea, mutta ei saanut mitään.',
+    'Eppu tuijotti hakutuloksia, mutta ei saanut mitään.',
   ],
   searchSuccess: [
     'Eppu hyväksyy: haku näyttää lupaavalta.',

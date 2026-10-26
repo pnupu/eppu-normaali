@@ -27,8 +27,8 @@ interface DbDiscordLoginRow {
 
 const SESSION_TTL_MS = Math.max(
   60_000,
-  parseInt(process.env.WEB_SESSION_TTL_MS || '86400000', 10) || 86_400_000
-); // 24h default
+  parseInt(process.env.WEB_SESSION_TTL_MS || '2592000000', 10) || 2_592_000_000
+); // 30d default
 const AUTH_DB_PATH = process.env.WEB_AUTH_DB_PATH?.trim() || path.join(__dirname, '../../web-auth.db');
 
 const db = new sqlite3.Database(AUTH_DB_PATH);

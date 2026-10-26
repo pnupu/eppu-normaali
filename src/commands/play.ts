@@ -8,49 +8,30 @@ import {
   StreamType,
   AudioPlayerStatus,
   AudioPlayer,
+  AudioResource,
+  VoiceConnection,
   VoiceConnectionStatus,
   VoiceConnectionDisconnectReason,
   getVoiceConnection,
   entersState
 } from '@discordjs/voice';
-import youtubeDl, { Payload, Flags } from 'youtube-dl-exec';
-import { MusicQueue } from '../music/queue';
+import {
+  YTDLP_BIN,
+  buildYtDlpSpawnArgs,
+  formatYtDlpError,
+  isYtCookieAuthErrorText,
+  isYtExtractionChallengeErrorText,
+  refreshYtCookiesFromBrowser,
+} from '../music/ytdlp';
+import { MusicQueue, type QueueItem } from '../music/queue';
+import { ResolveError, resolveInput, ytDlpStreamInput, type Track } from '../music/sources';
 import path from 'path';
 import { spawn, ChildProcessWithoutNullStreams, execSync } from 'child_process';
 import { Readable, PassThrough } from 'stream';
 import fs from 'fs';
 import { createHash } from 'crypto';
-interface ExtendedRequestedDownload {
-  url: string;
-}
-interface ExtendedPayload extends Omit<Payload, 'requested_downloads'> {
-  requested_downloads: ExtendedRequestedDownload[];
-}
-interface PlaylistEntry {
-  title: string;
-  url: string;
-  id: string;
-}
-interface SearchEntry {
-  id?: string;
-  title?: string;
-  url?: string;
-  duration?: number;
-  uploader?: string;
-  thumbnail?: string;
-  thumbnails?: Array<{ url?: string }>;
-}
-interface SearchPayload {
-  entries?: SearchEntry[];
-}
-export interface WebSearchResult {
-  id: string;
-  title: string;
-  url: string;
-  duration: number | null;
-  channel: string | null;
-  thumbnail: string | null;
-}
+import { isDiscordVoiceListener, startDiscordVoiceReceiver } from '../voice/discordVoiceRuntime';
+import { logUsage, type UsageLogFields } from '../usageLog';
 interface NextSongPrefetch {
   guildId: string;
   url: string;
@@ -83,31 +64,54 @@ interface PrimeHooks {
 }
 export const queues = new Map<string, MusicQueue>();
 const PREFETCH_DIR = path.join(__dirname, '../../tmp/prefetch');
-const YTDLP_BIN = path.join(__dirname, '../../node_modules/youtube-dl-exec/bin/yt-dlp');
-const DEFAULT_COOKIES_PATH = path.join(__dirname, '../../cookies.txt');
+// Prefetched files only belong to the process that downloaded them; drop leftovers from restarts.
+fs.rmSync(PREFETCH_DIR, { recursive: true, force: true });
 const nextSongPrefetches = new Map<string, NextSongPrefetch>();
 const prefetchTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const songStartTimes = new Map<string, number>();
 const startupTraces = new Map<string, StartupTrace>();
 const queueCreationPromises = new Map<string, Promise<MusicQueue>>();
 let startupTraceIdCounter = 0;
-// Per-guild volume tracking (0-100)
+// Per-guild volume (0-100). 100 plays the source at its own loudness; changes apply to the playing track live.
 const guildVolumes = new Map<string, number>();
+const currentResources = new Map<string, AudioResource>();
 export function getVolume(guildId: string): number {
-  return guildVolumes.get(guildId) ?? 50;
+  return guildVolumes.get(guildId) ?? 100;
 }
 export function setVolume(guildId: string, volume: number): void {
-  guildVolumes.set(guildId, Math.max(0, Math.min(100, volume)));
+  if (!Number.isFinite(volume)) return;
+  const clamped = Math.max(0, Math.min(100, Math.round(volume)));
+  guildVolumes.set(guildId, clamped);
+  currentResources.get(guildId)?.volume?.setVolumeLogarithmic(clamped / 100);
 }
-function formatYtDlpError(error: unknown): string {
-  const err = error as { message?: string; stderr?: string; stdout?: string; exitCode?: number } | null;
-  if (!err) return 'unknown error';
-  const parts: string[] = [];
-  if (typeof err.exitCode === 'number') parts.push(`exitCode=${err.exitCode}`);
-  if (err.message) parts.push(`message=${String(err.message).trim()}`);
-  if (err.stderr) parts.push(`stderr=${String(err.stderr).trim()}`);
-  if (err.stdout) parts.push(`stdout=${String(err.stdout).trim()}`);
-  return parts.join(' | ') || 'unknown error';
+/** Forget a guild's queue and stop its player, so the stream's ffmpeg/yt-dlp children are torn down. */
+function dropQueue(guildId: string): void {
+  queues.get(guildId)?.clear();
+  queues.delete(guildId);
+  currentResources.delete(guildId);
+}
+/** Milliseconds played of the current track, or null when nothing is playing. */
+export function getPlaybackPositionMs(guildId: string): number | null {
+  const resource = currentResources.get(guildId);
+  return resource && !resource.ended ? resource.playbackDuration : null;
+}
+function voiceChannelBitrate(guildId: string, message: Message): number {
+  const channelId = getVoiceConnection(guildId)?.joinConfig.channelId;
+  const channel = channelId ? message.guild?.channels.cache.get(channelId) : null;
+  const bitrate = channel && channel.isVoiceBased() ? channel.bitrate : 0;
+  return bitrate >= 8000 ? bitrate : 128000;
+}
+/**
+ * Wrap a raw PCM stream for Discord: inline volume for the web slider, and an Opus encoder
+ * bitrate matching the voice channel (libopus would otherwise pick ~99 kbps for stereo).
+ */
+function createPlaybackResource(stream: Readable, message: Message): AudioResource {
+  const guildId = message.guild!.id;
+  const resource = createAudioResource(stream, { inputType: StreamType.Raw, inlineVolume: true });
+  resource.volume?.setVolumeLogarithmic(getVolume(guildId) / 100);
+  resource.encoder?.setBitrate(voiceChannelBitrate(guildId, message));
+  currentResources.set(guildId, resource);
+  return resource;
 }
 function isExpectedStreamTeardownError(error: unknown): boolean {
   const err = error as { code?: string; message?: string } | null;
@@ -223,276 +227,6 @@ function wireFfmpegDiagnostics(
     );
   });
 }
-interface YtDlpRuntimeOptions {
-  jsRuntimes: string;
-  cookiesFilePath: string;
-  cookiesFile: string | null;
-  cookiesFromBrowser: string | null;
-  cookieSource: 'file' | 'browser' | 'none';
-}
-let runtimeOptionsLogged = false;
-function getYtDlpRuntimeOptions(): YtDlpRuntimeOptions {
-  const jsRuntimes = process.env.YTDLP_JS_RUNTIMES?.trim() || 'node';
-  const cookiesFromBrowserRaw = process.env.YTDLP_COOKIES_FROM_BROWSER?.trim();
-  const cookiesFromBrowser = cookiesFromBrowserRaw && cookiesFromBrowserRaw.length > 0
-    ? cookiesFromBrowserRaw
-    : null;
-  const configuredCookiesPath = process.env.YTDLP_COOKIES_FILE?.trim();
-  const cookiesPathCandidate = configuredCookiesPath && configuredCookiesPath.length > 0
-    ? configuredCookiesPath
-    : DEFAULT_COOKIES_PATH;
-  const cookiesFile = fs.existsSync(cookiesPathCandidate) ? cookiesPathCandidate : null;
-  const cookieSource: YtDlpRuntimeOptions['cookieSource'] = cookiesFile
-    ? 'file'
-    : (cookiesFromBrowser ? 'browser' : 'none');
-
-  if (!runtimeOptionsLogged) {
-    runtimeOptionsLogged = true;
-    const cookiesMode = cookieSource === 'file'
-      ? `file:${cookiesFile}`
-      : (cookieSource === 'browser' ? `browser:${cookiesFromBrowser}` : 'none');
-    console.log(`[yt-dlp] runtime js-runtimes=${jsRuntimes} cookies=${cookiesMode}`);
-    if (!cookiesFromBrowser && configuredCookiesPath && !cookiesFile) {
-      console.warn(`[yt-dlp] Configured cookies file not found: ${configuredCookiesPath}`);
-    }
-    if (cookiesFile && cookiesFromBrowser) {
-      console.log('[yt-dlp] Both cookie file and browser cookies configured; preferring cookies file.');
-    }
-  }
-
-  return {
-    jsRuntimes,
-    cookiesFilePath: cookiesPathCandidate,
-    cookiesFile,
-    cookiesFromBrowser,
-    cookieSource,
-  };
-}
-type YtCookieSourceOverride = 'default' | 'file' | 'browser';
-function resolveCookieSource(
-  runtime: YtDlpRuntimeOptions,
-  override: YtCookieSourceOverride = 'default'
-): YtDlpRuntimeOptions['cookieSource'] {
-  if (override === 'file') {
-    return runtime.cookiesFile ? 'file' : 'none';
-  }
-  if (override === 'browser') {
-    return runtime.cookiesFromBrowser ? 'browser' : 'none';
-  }
-  return runtime.cookieSource;
-}
-function buildYtDlpFlags(base: Flags, overrideCookieSource: YtCookieSourceOverride = 'default'): Flags {
-  const runtime = getYtDlpRuntimeOptions();
-  const merged = { ...base } as Flags & { cookiesFromBrowser?: string };
-  merged.jsRuntimes = runtime.jsRuntimes as Flags['jsRuntimes'];
-  const cookieSource = resolveCookieSource(runtime, overrideCookieSource);
-  if (cookieSource === 'file' && runtime.cookiesFile) {
-    merged.cookies = runtime.cookiesFile;
-  } else if (cookieSource === 'browser' && runtime.cookiesFromBrowser) {
-    merged.cookiesFromBrowser = runtime.cookiesFromBrowser;
-  }
-  return merged;
-}
-function buildYtDlpSpawnArgs(baseArgs: string[], overrideCookieSource: YtCookieSourceOverride = 'default'): string[] {
-  const runtime = getYtDlpRuntimeOptions();
-  const args = [...baseArgs, '--js-runtimes', runtime.jsRuntimes];
-  const cookieSource = resolveCookieSource(runtime, overrideCookieSource);
-  if (cookieSource === 'file' && runtime.cookiesFile) {
-    args.push('--cookies', runtime.cookiesFile);
-  } else if (cookieSource === 'browser' && runtime.cookiesFromBrowser) {
-    args.push('--cookies-from-browser', runtime.cookiesFromBrowser);
-  }
-  return args;
-}
-function isYtCookieAuthErrorText(text: string): boolean {
-  const value = text.toLowerCase();
-  return value.includes('sign in to confirm you')
-    || value.includes("sign in to confirm you're not a bot")
-    || value.includes('sign in to confirm you\u2019re not a bot')
-    || value.includes('use --cookies-from-browser or --cookies for the authentication');
-}
-function isYtExtractionChallengeErrorText(text: string): boolean {
-  const value = text.toLowerCase();
-  return value.includes('n challenge solving failed')
-    || value.includes('signature solving failed')
-    || value.includes('js challenge provider')
-    || value.includes('only images are available')
-    || value.includes('requested format is not available')
-    || value.includes('some formats may be missing');
-}
-function isYouTubeUrlLike(input: string): boolean {
-  const value = input.toLowerCase();
-  return value.includes('youtube.com/') || value.includes('youtu.be/');
-}
-function normalizeAndroidFallbackFormat(format?: string): string | null {
-  if (!format) return null;
-  const trimmed = format.trim();
-  if (!trimmed) return null;
-  if (trimmed.includes('bestaudio')) {
-    return '18/best';
-  }
-  return trimmed;
-}
-function buildAndroidFallbackJsonArgs(input: string, baseFlags: Flags): string[] {
-  const args: string[] = [
-    '--extractor-args', 'youtube:player_client=android',
-    '--no-warnings',
-    '--no-progress',
-  ];
-  if (baseFlags.dumpSingleJson) args.push('--dump-single-json');
-  if (baseFlags.simulate) args.push('--simulate');
-  if (baseFlags.flatPlaylist) args.push('--flat-playlist');
-  const fallbackFormat = normalizeAndroidFallbackFormat(typeof baseFlags.format === 'string' ? baseFlags.format : undefined);
-  if (fallbackFormat) {
-    args.push('-f', fallbackFormat);
-  }
-  args.push(input);
-  return args;
-}
-async function runYtDlpJsonViaSpawn<T>(args: string[], context: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const proc = spawn(YTDLP_BIN, args);
-    let stdout = '';
-    let stderr = '';
-    proc.stdout.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString();
-    });
-    proc.stderr.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString();
-      if (stderr.length > 8192) stderr = stderr.slice(-8192);
-    });
-    proc.on('error', (error) => {
-      reject(error);
-    });
-    proc.on('exit', (code) => {
-      if (code !== 0) {
-        reject({
-          exitCode: code,
-          message: `yt-dlp spawn failed in ${context}`,
-          stderr: stderr.trim() || undefined,
-          stdout: stdout.trim() || undefined,
-        });
-        return;
-      }
-      try {
-        resolve(JSON.parse(stdout) as T);
-      } catch (error) {
-        reject({
-          message: `yt-dlp JSON parse failed in ${context}: ${(error as Error).message}`,
-          stderr: stderr.trim() || undefined,
-          stdout: stdout.trim() || undefined,
-        });
-      }
-    });
-  });
-}
-function isYtCookieAuthError(error: unknown): boolean {
-  const text = formatYtDlpError(error);
-  return isYtCookieAuthErrorText(text);
-}
-let cookieRefreshPromise: Promise<boolean> | null = null;
-async function refreshYtCookiesFromBrowser(reason: string, urlForRefresh?: string): Promise<boolean> {
-  const runtime = getYtDlpRuntimeOptions();
-  const browserProfile = runtime.cookiesFromBrowser;
-  if (!browserProfile) {
-    console.warn(`[yt-cookie] Skipping refresh (${reason}): YTDLP_COOKIES_FROM_BROWSER not configured`);
-    return false;
-  }
-  if (cookieRefreshPromise) {
-    console.log(`[yt-cookie] Refresh already in progress, waiting (reason=${reason})`);
-    return cookieRefreshPromise;
-  }
-  cookieRefreshPromise = new Promise<boolean>((resolve) => {
-    try {
-      fs.mkdirSync(path.dirname(runtime.cookiesFilePath), { recursive: true });
-    } catch (error) {
-      console.error(`[yt-cookie] Failed to prepare cookie dir for ${runtime.cookiesFilePath}:`, error);
-    }
-    const refreshUrl = (urlForRefresh && /^https?:\/\//.test(urlForRefresh))
-      ? urlForRefresh
-      : (process.env.YTDLP_COOKIE_REFRESH_URL?.trim() || 'https://www.youtube.com/watch?v=dQw4w9WgXcQ');
-    const args = [
-      '--simulate',
-      '--no-warnings',
-      '--no-progress',
-      '--cookies-from-browser', browserProfile,
-      '--cookies', runtime.cookiesFilePath,
-      '--js-runtimes', runtime.jsRuntimes,
-      refreshUrl,
-    ];
-    console.warn(
-      `[yt-cookie] Refreshing cookies reason=${reason} browser=${browserProfile} `
-      + `target=${runtime.cookiesFilePath} url=${refreshUrl}`
-    );
-    const refreshProc = spawn(YTDLP_BIN, args);
-    let stderr = '';
-    refreshProc.stderr.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString();
-      if (stderr.length > 4096) stderr = stderr.slice(-4096);
-    });
-    refreshProc.on('error', (error: Error) => {
-      console.error('[yt-cookie] Cookie refresh process error:', error);
-      resolve(false);
-    });
-    refreshProc.on('exit', (code: number | null) => {
-      const wroteFile = fs.existsSync(runtime.cookiesFilePath) && fs.statSync(runtime.cookiesFilePath).size > 0;
-      const ok = code === 0 && wroteFile;
-      if (ok) {
-        console.log(`[yt-cookie] Cookie refresh succeeded, wrote ${runtime.cookiesFilePath}`);
-      } else {
-        const trimmed = stderr.trim();
-        console.error(
-          `[yt-cookie] Cookie refresh failed code=${code ?? 'null'} `
-          + `${trimmed ? `stderr=${trimmed}` : ''}`
-        );
-      }
-      resolve(ok);
-    });
-  }).finally(() => {
-    cookieRefreshPromise = null;
-  });
-  return cookieRefreshPromise;
-}
-async function runYtDlpJsonWithAutoCookieRefresh<T>(
-  input: string,
-  baseFlags: Flags,
-  context: string
-): Promise<T> {
-  let lastError: unknown;
-  try {
-    return await youtubeDl(input, buildYtDlpFlags(baseFlags)) as unknown as T;
-  } catch (error) {
-    lastError = error;
-    const runtime = getYtDlpRuntimeOptions();
-    const formattedError = formatYtDlpError(error);
-    const shouldRefreshCookies = runtime.cookiesFromBrowser
-      && (isYtCookieAuthError(error) || isYtExtractionChallengeErrorText(formattedError));
-    if (shouldRefreshCookies) {
-      console.warn(`[yt-cookie] Refresh-triggering extraction error in ${context}, refreshing cookies and retrying once`);
-      const refreshed = await refreshYtCookiesFromBrowser(`extractor-error:${context}`, input);
-      if (refreshed) {
-        try {
-          return await youtubeDl(input, buildYtDlpFlags(baseFlags, 'file')) as unknown as T;
-        } catch (retryError) {
-          lastError = retryError;
-          if (isYtCookieAuthError(retryError) && runtime.cookiesFromBrowser) {
-            console.warn(`[yt-cookie] File retry failed in ${context}, retrying once with browser cookies`);
-            try {
-              return await youtubeDl(input, buildYtDlpFlags(baseFlags, 'browser')) as unknown as T;
-            } catch (browserRetryError) {
-              lastError = browserRetryError;
-            }
-          }
-        }
-      }
-    }
-  }
-  if (isYouTubeUrlLike(input) && isYtExtractionChallengeErrorText(formatYtDlpError(lastError))) {
-    console.warn(`[yt-dlp] ${context} retrying with android no-cookie fallback`);
-    return await runYtDlpJsonViaSpawn<T>(buildAndroidFallbackJsonArgs(input, baseFlags), `${context} android-fallback`);
-  }
-  throw lastError;
-}
 function beginStartupTrace(message: Message, title: string, url: string, source: StartupSource): StartupTrace | null {
   if (!startupDebugEnabled()) return null;
   const guildId = message.guild?.id;
@@ -527,11 +261,6 @@ function clearStartupTrace(guildId: string): void {
 }
 function prefetchEnabled(): boolean {
   const value = process.env.PREFETCH_NEXT_SONG?.trim().toLowerCase();
-  return value !== '0' && value !== 'false' && value !== 'off' && value !== 'no';
-}
-function inlineVolumeEnabled(): boolean {
-  const value = process.env.AUDIO_INLINE_VOLUME?.trim().toLowerCase();
-  if (!value) return false;
   return value !== '0' && value !== 'false' && value !== 'off' && value !== 'no';
 }
 function prefetchWarmupMs(): number {
@@ -571,6 +300,9 @@ async function primePcmStream(source: Readable, label: string, hooks?: PrimeHook
   }
   const timeoutMs = playbackPrimeTimeoutMs();
   const output = new PassThrough();
+  // discord.js destroys the resource stream on stop/skip; pass that upstream so the
+  // ffmpeg/yt-dlp feeding `source` get killed instead of blocking on a full pipe forever.
+  output.once('close', () => source.destroy());
   return new Promise((resolve) => {
     let primed = false;
     let bufferedBytes = 0;
@@ -643,9 +375,14 @@ async function primePcmStream(source: Readable, label: string, hooks?: PrimeHook
     };
     const onError = (error: Error) => {
       if (!primed) {
+        // Nobody listens on `output` yet, so destroying it with an error would be an uncaught
+        // 'error' event and crash the bot. End it empty instead: the player goes idle and the
+        // queue advances to the next song.
         primed = true;
         cleanup();
-        output.destroy(error);
+        console.warn(`[playback] Stream failed before audio started for ${label}: ${error.message}`);
+        hooks?.onPrimed?.(bufferedBytes, 'eof');
+        output.end();
         resolve(output);
         return;
       }
@@ -709,7 +446,8 @@ function startNextSongPrefetch(message: Message): void {
     clearNextSongPrefetch(guildId);
   }
   ensurePrefetchDir();
-  const fileName = `${guildId}-${hashForFileName(nextSong.url)}.webm`;
+  // Container depends on the source (webm, m4a, mpegts); ffmpeg probes the content, not the extension.
+  const fileName = `${guildId}-${hashForFileName(nextSong.url)}.audio`;
   const filePath = path.join(PREFETCH_DIR, fileName);
   removePrefetchFile(filePath);
   console.log(`[prefetch] Starting next-song prefetch guild=${message.guild?.name} url=${nextSong.url}`);
@@ -718,7 +456,7 @@ function startNextSongPrefetch(message: Message): void {
     '--no-warnings',
     '--no-progress',
     '-o', filePath,
-    nextSong.url,
+    ...ytDlpStreamInput(nextSong),
   ]));
   const state: NextSongPrefetch = {
     guildId,
@@ -884,183 +622,118 @@ async function ensureQueueAndConnection(message: Message, channelId: string): Pr
   return creation;
 }
 
-export async function addSongFromWeb(
-  client: Client,
-  guildId: string,
-  url: string,
+export interface EnqueueResult {
+  success: boolean;
+  error?: string;
+  added: number;
+  skipped: number;
+  /** Playlist, album or set name when the input was a collection. */
+  name: string | null;
+  firstTitle: string | null;
+}
+
+function userFacingResolveError(error: unknown): string {
+  if (error instanceof ResolveError) return error.message;
+  return 'Kappaleen haku epäonnistui. Yritä hetken päästä uudelleen.';
+}
+
+/** Add tracks to the queue; starts playback when nothing was playing. */
+function enqueueTracks(
+  queue: MusicQueue,
+  tracks: Track[],
   requestedBy: string,
-  options?: { resolvedTitle?: string }
-): Promise<{ success: boolean; error?: string }> {
-  let queue = queues.get(guildId);
-  let playbackMessage: Message | null = null;
-  let resolvedGuild: any = null;
-  let resolvedChannelId: string | null = null;
-  if (!queue) {
-    const resolved = await resolveDefaultVoiceChannelForGuild(client, guildId);
-    if (resolved.error || !resolved.channelId) {
-      return { success: false, error: resolved.error || 'Could not resolve default voice channel.' };
-    }
-    resolvedGuild = resolved.guild;
-    resolvedChannelId = resolved.channelId;
-    playbackMessage = createWebPlaybackMessage(client, resolvedGuild, requestedBy);
-  }
-  try {
-    let videoTitle = options?.resolvedTitle?.trim() || '';
-    if (!videoTitle) {
-      const fetchStartedAt = Date.now();
-      console.log(`[yt-fetch] web-add guild=${guildId} begin url=${url}`);
-      const flags = buildYtDlpFlags({
-        dumpSingleJson: true,
-        format: 'bestaudio',
-        simulate: true,
-      });
-      const videoInfo = await runYtDlpJsonWithAutoCookieRefresh<ExtendedPayload>(
-        url,
-        flags,
-        `web-add guild=${guildId}`
-      );
-      if (!videoInfo.title) {
-        console.error(`[yt-fetch] web-add guild=${guildId} missing title in response`);
-        return { success: false, error: 'Could not get video info' };
-      }
-      videoTitle = videoInfo.title;
-      console.log(
-        `[yt-fetch] web-add guild=${guildId} success title="${videoTitle}" in ${Date.now() - fetchStartedAt}ms`
-      );
-    } else {
-      console.log(`[yt-fetch] web-add guild=${guildId} using provided title="${videoTitle}" url=${url}`);
-    }
-
-    if (!queue) {
-      if (!playbackMessage || !resolvedChannelId) {
-        return { success: false, error: 'Could not resolve web playback context.' };
-      }
-      console.log(
-        `[web-voice] Bootstrapping queue for guild=${resolvedGuild?.name || guildId} (${guildId}) `
-        + `channelId=${resolvedChannelId}`
-      );
-      try {
-        queue = await ensureQueueAndConnection(playbackMessage, resolvedChannelId);
-      } catch (error) {
-        console.error('[web-voice] Failed to create queue/connection from web:', error);
-        return { success: false, error: 'Could not join the default voice channel.' };
-      }
-    }
-
-    const hadCurrentSongBeforeAdd = !!queue.getCurrentSong();
-    queue.addSong({
-      title: videoTitle,
-      url: url,
-      requestedBy: requestedBy
+  message: Message,
+  usageContext: UsageLogFields,
+  isFirstSong: boolean
+): void {
+  const wasIdle = !queue.getCurrentSong();
+  tracks.forEach((track, index) => {
+    queue.addSong({ ...track, requestedBy });
+    logUsage('queue.song_added', {
+      ...usageContext,
+      title: track.title,
+      url: track.url,
+      trackSource: track.source,
+      requestedBy,
+      queueHadCurrentSong: !wasIdle,
+      startedPlayback: wasIdle && index === 0,
+      ...(tracks.length > 1 ? { playlistPosition: index + 1 } : {}),
+      ...queueUsageMetrics(queue),
     });
-    if (!playbackMessage) {
-      if (!resolvedGuild) {
-        resolvedGuild = client.guilds.cache.get(guildId) || await client.guilds.fetch(guildId).catch(() => null);
-      }
-      if (resolvedGuild) {
-        playbackMessage = createWebPlaybackMessage(client, resolvedGuild, requestedBy);
-      }
-    }
-    if (playbackMessage) {
-      requestNextSongPrefetch(playbackMessage);
-    }
-    if (!hadCurrentSongBeforeAdd && queue.getCurrentSong()?.url === url) {
-      if (!playbackMessage && resolvedGuild) {
-        playbackMessage = createWebPlaybackMessage(client, resolvedGuild, requestedBy);
-      }
-      if (!playbackMessage) {
-        return { success: false, error: 'Guild not found for playback start.' };
-      }
-      playYouTubeUrl(url, queue.getPlayer(), playbackMessage, videoTitle, true);
-    }
-    return { success: true };
-  } catch (error) {
-    console.error(`[yt-fetch] web-add guild=${guildId} failed: ${formatYtDlpError(error)}`);
-    return { success: false, error: 'Failed to fetch video info' };
+  });
+  const current = queue.getCurrentSong();
+  if (wasIdle && current) {
+    void playTrack(current, queue.getPlayer(), message, isFirstSong);
+  } else {
+    requestNextSongPrefetch(message);
   }
 }
-export async function searchYouTubeFromWeb(
-  query: string,
-  limit: number = 6
-): Promise<{ success: boolean; results?: WebSearchResult[]; error?: string }> {
-  const trimmedQuery = query.trim();
-  if (!trimmedQuery) {
-    return { success: false, error: 'Search query is empty' };
+
+/**
+ * Queue songs from the web UI (or voice commands). Pass `tracks` when they are already known
+ * (search results, saved playlists) to skip resolution; otherwise `input` is resolved as a link or search text.
+ */
+export async function enqueueFromWeb(
+  client: Client,
+  guildId: string,
+  request: { input?: string; tracks?: Track[] },
+  requestedBy: string,
+  usageSource: string = 'web'
+): Promise<EnqueueResult> {
+  const usageContext: UsageLogFields = { source: usageSource, guildId, requestedBy, input: request.input ?? null };
+  const fail = (error: string, reason: string, extra: UsageLogFields = {}): EnqueueResult => {
+    logUsage('queue.song_add_failed', { ...usageContext, reason, error, ...extra });
+    return { success: false, error, added: 0, skipped: 0, name: null, firstTitle: null };
+  };
+
+  let tracks = request.tracks ?? [];
+  let name: string | null = null;
+  let skipped = 0;
+  if (tracks.length === 0) {
+    const input = request.input?.trim();
+    if (!input) return fail('Kirjoita hakusana tai liitä linkki.', 'empty_input');
+    const startedAt = Date.now();
+    try {
+      ({ tracks, name, skipped } = await resolveInput(input));
+      console.log(
+        `[resolve] guild=${guildId} input="${input}" tracks=${tracks.length} skipped=${skipped} in ${Date.now() - startedAt}ms`
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : formatYtDlpError(error);
+      console.error(`[resolve] guild=${guildId} input="${input}" failed in ${Date.now() - startedAt}ms: ${detail}`);
+      return fail(userFacingResolveError(error), 'resolve_failed', { detail });
+    }
   }
-  const cappedLimit = Math.max(1, Math.min(10, limit));
-  const startedAt = Date.now();
-  console.log(`[yt-search] begin query="${trimmedQuery}" limit=${cappedLimit}`);
-  try {
-    const flags = buildYtDlpFlags({
-      dumpSingleJson: true,
-      flatPlaylist: true,
-      simulate: true,
-    });
-    const payload = await runYtDlpJsonWithAutoCookieRefresh<SearchPayload>(
-      `ytsearch${cappedLimit}:${trimmedQuery}`,
-      flags,
-      `yt-search query=${trimmedQuery}`
-    );
-    const entries = Array.isArray(payload.entries) ? payload.entries : [];
-    const extractVideoId = (entryId: string, entryUrl?: string): string | null => {
-      const rawCandidates = [entryId, entryUrl].filter((value): value is string => !!value);
-      for (const raw of rawCandidates) {
-        if (/^[a-zA-Z0-9_-]{11}$/.test(raw)) {
-          return raw;
-        }
-        if (!/^https?:\/\//.test(raw)) {
-          continue;
-        }
-        try {
-          const parsed = new URL(raw);
-          const v = parsed.searchParams.get('v');
-          if (v && /^[a-zA-Z0-9_-]{11}$/.test(v)) {
-            return v;
-          }
-          if (parsed.hostname.includes('youtu.be')) {
-            const shortId = parsed.pathname.split('/').filter(Boolean)[0];
-            if (shortId && /^[a-zA-Z0-9_-]{11}$/.test(shortId)) {
-              return shortId;
-            }
-          }
-          const shortsMatch = parsed.pathname.match(/\/shorts\/([a-zA-Z0-9_-]{11})/);
-          if (shortsMatch?.[1]) {
-            return shortsMatch[1];
-          }
-        } catch {
-          // Ignore invalid URL parse and continue.
-        }
-      }
-      return null;
-    };
-    const results = entries
-      .map((entry): WebSearchResult | null => {
-        const id = (typeof entry.id === 'string' && entry.id) || (typeof entry.url === 'string' ? entry.url : '');
-        if (!id || !entry.title) return null;
-        const url = /^https?:\/\//.test(id) ? id : `https://www.youtube.com/watch?v=${id}`;
-        const thumbFromArray = Array.isArray(entry.thumbnails)
-          ? entry.thumbnails.find((t) => typeof t?.url === 'string')?.url || null
-          : null;
-        const videoId = extractVideoId(id, typeof entry.url === 'string' ? entry.url : undefined);
-        const thumbnail = (typeof entry.thumbnail === 'string' && entry.thumbnail)
-          || thumbFromArray
-          || (videoId ? `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg` : null);
-        return {
-          id,
-          title: entry.title,
-          url,
-          duration: typeof entry.duration === 'number' ? entry.duration : null,
-          channel: typeof entry.uploader === 'string' ? entry.uploader : null,
-          thumbnail,
-        };
-      })
-      .filter((item): item is WebSearchResult => item !== null);
-    console.log(`[yt-search] success query="${trimmedQuery}" results=${results.length} in ${Date.now() - startedAt}ms`);
-    return { success: true, results };
-  } catch (error) {
-    console.error(`[yt-search] failed query="${trimmedQuery}" error=${formatYtDlpError(error)}`);
-    return { success: false, error: 'YouTube search failed' };
+
+  let queue = queues.get(guildId);
+  const isFirstSong = !queue;
+  let guild: any = client.guilds.cache.get(guildId) || null;
+  if (!queue) {
+    const target = await resolveDefaultVoiceChannelForGuild(client, guildId);
+    if (target.error || !target.channelId) {
+      return fail(target.error || 'Oletusäänikanavaa ei löytynyt.', 'default_voice_channel_unavailable');
+    }
+    guild = target.guild;
+    console.log(`[web-voice] Bootstrapping queue for guild=${guild?.name || guildId} channelId=${target.channelId}`);
+    try {
+      queue = await ensureQueueAndConnection(createWebPlaybackMessage(client, guild, requestedBy), target.channelId);
+    } catch (error) {
+      console.error('[web-voice] Failed to create queue/connection from web:', error);
+      return fail('Eppu ei päässyt äänikanavalle.', 'voice_connection_failed');
+    }
   }
+  guild = guild || await client.guilds.fetch(guildId).catch(() => null);
+  if (!guild) return fail('Palvelinta ei löytynyt.', 'guild_not_found');
+
+  enqueueTracks(
+    queue,
+    tracks,
+    requestedBy,
+    createWebPlaybackMessage(client, guild, requestedBy),
+    { ...usageContext, guildName: guild.name },
+    isFirstSong
+  );
+  return { success: true, added: tracks.length, skipped, name, firstTitle: tracks[0]?.title ?? null };
 }
 // Track the last bot message for each guild
 const lastBotMessages = new Map<string, Message>();
@@ -1104,16 +777,6 @@ function cleanupLogFiles() {
     console.error('Error cleaning up log files:', error);
   }
 }
-async function getPoToken(): Promise<string> {
-  try {
-    const response = await fetch('http://localhost:8080/token');
-    const data = await response.text();
-    return data.trim();
-  } catch (error) {
-    console.error('Failed to fetch PO token:', error);
-    throw error;
-  }
-}
 function createMusicControls() {
   const row = new ActionRowBuilder<ButtonBuilder>()
     .addComponents(
@@ -1140,7 +803,7 @@ async function sendOrEditMusicMessage(message: Message, content: string, isFirst
   try {
     // If this is the first song and we haven't replied yet, reply to the original message
     if (isFirstSong && !hasRepliedToPlay.get(guildId)) {
-      const reply = await message.reply({ content, components: [controls] });
+      const reply = await message.reply({ content, components: [controls], allowedMentions: { parse: [], repliedUser: false } });
       lastBotMessages.set(guildId, reply);
       hasRepliedToPlay.set(guildId, true);
       return;
@@ -1156,7 +819,7 @@ async function sendOrEditMusicMessage(message: Message, content: string, isFirst
         
         if (latestMessage && latestMessage.id === lastBotMessage.id && latestMessage.author.id === message.client.user!.id) {
           // Our message is still the latest, edit it
-          await lastBotMessage.edit({ content, components: [controls] });
+          await lastBotMessage.edit({ content, components: [controls], allowedMentions: { parse: [], repliedUser: false } });
           return;
         }
       } catch (error) {
@@ -1165,13 +828,13 @@ async function sendOrEditMusicMessage(message: Message, content: string, isFirst
     }
     
     // Send a new message
-    const newMessage = await (message.channel as any).send({ content, components: [controls] });
+    const newMessage = await (message.channel as any).send({ content, components: [controls], allowedMentions: { parse: [], repliedUser: false } });
     lastBotMessages.set(guildId, newMessage);
     
   } catch (error) {
     console.error('Error sending/editing music message:', error);
     // Fallback to simple message
-    (message.channel as any).send(content);
+    (message.channel as any).send({ content, allowedMentions: { parse: [] } });
   }
 }
 function voiceChannelLabel(message: Message, channelId: string | undefined): string {
@@ -1191,6 +854,37 @@ function queueStateSnapshot(guildId: string): string {
   const queueIdle = queue.isIdle();
   const playerState = queue.getPlayer().state.status;
   return `queueCurrent="${currentTitle}" queuedCount=${queuedCount} hasNext=${hasNext} queueIdle=${queueIdle} playerState=${playerState}`;
+}
+
+function queueUsageMetrics(queue: MusicQueue | undefined | null): UsageLogFields {
+  if (!queue) return { queuePresent: false };
+  const currentSong = queue.getCurrentSong();
+  return {
+    queuePresent: true,
+    currentTitle: currentSong?.title ?? null,
+    currentUrl: currentSong?.url ?? null,
+    queuedCount: queue.getQueue().length,
+    hasNextSong: queue.hasNextSong(),
+    paused: queue.isPausedState(),
+    playerState: queue.getPlayer().state.status,
+  };
+}
+
+function messageUsageContext(message: Message, source: string): UsageLogFields {
+  const channel = message.channel as any;
+  const author = message.author as any;
+  const voiceChannel = message.member?.voice?.channel as any;
+  return {
+    source,
+    guildId: message.guild?.id ?? null,
+    guildName: message.guild?.name ?? null,
+    channelId: channel?.id ?? null,
+    channelName: channel?.name ?? null,
+    voiceChannelId: voiceChannel?.id ?? null,
+    voiceChannelName: voiceChannel?.name ?? null,
+    userId: author?.id ?? null,
+    username: author?.globalName || author?.username || null,
+  };
 }
 
 function hasGuildTrackingState(guildId: string): boolean {
@@ -1234,10 +928,22 @@ function voiceDisconnectReasonLabel(reason: unknown): string {
 }
 export async function handlePlay(message: Message, url: string) {
   console.log('Starting handlePlay with URL:', url);
+  const usageContext = {
+    ...messageUsageContext(message, 'discord'),
+    commandName: 'play',
+    url,
+  };
+  logUsage('play.requested', usageContext);
   
   // Check disk space before proceeding
   const diskInfo = checkDiskSpace();
   if (diskInfo.percentage > 95) {
+    logUsage('play.rejected', {
+      ...usageContext,
+      reason: 'disk_space_critical',
+      diskUsedPercent: diskInfo.percentage,
+      diskAvailable: diskInfo.available,
+    });
     message.reply('⚠️ Error: Disk space critically low! Cannot play music. Please free up some space.');
     return;
   }
@@ -1257,213 +963,64 @@ export async function handlePlay(message: Message, url: string) {
   );
   if (!targetVoiceChannel) {
     console.log('[voice] User not in voice channel and no valid default channel configured');
+    logUsage('play.rejected', {
+      ...usageContext,
+      reason: 'no_voice_channel',
+      defaultVoiceChannelId,
+    });
     message.reply('You need to be in a voice channel (or configure DEFAULT_VOICE_CHANNEL_ID).');
     return;
   }
   const guildId = message.guild!.id;
-  let queue = queues.get(guildId);
-  console.log('Queue exists:', !!queue);
+  const resolveStartedAt = Date.now();
+  let resolved;
   try {
-    console.log('Fetching PO token');
-    
-    // Check if URL is a playlist
-    const isPlaylist = url.includes('playlist') || url.includes('list=');
-    
-    if (isPlaylist) {
-      await handlePlaylist(message, url, queue, targetVoiceChannel.id);
-      return;
-    }
-    
-    // Handle single video
-    const fetchStartedAt = Date.now();
-    console.log(`[yt-fetch] play guild=${guildId} begin url=${url}`);
-    console.log('Fetching video info with token');
-    const flags = buildYtDlpFlags({
-      dumpSingleJson: true,
-      format: 'bestaudio',
-      simulate: true,    // Don't download, just simulate
-    });
-    const videoInfo = await runYtDlpJsonWithAutoCookieRefresh<ExtendedPayload>(
-      url,
-      flags,
-      `play guild=${guildId}`
-    );
+    resolved = await resolveInput(url);
     console.log(
-      `[yt-fetch] play guild=${guildId} success title="${videoInfo.title || 'unknown'}" `
-      + `requestedDownloads=${videoInfo.requested_downloads?.length ?? 0} in ${Date.now() - fetchStartedAt}ms`
+      `[resolve] play guild=${guildId} input="${url}" tracks=${resolved.tracks.length} `
+      + `skipped=${resolved.skipped} in ${Date.now() - resolveStartedAt}ms`
     );
-    if (!videoInfo.requested_downloads?.[0]?.url) {
-      console.error(`[yt-fetch] play guild=${guildId} missing requested_downloads url`);
-      throw new Error('No audio URL found');
-    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : formatYtDlpError(error);
+    console.error(`[resolve] play guild=${guildId} input="${url}" failed: ${detail}`);
+    logUsage('play.failed', { ...usageContext, error: detail });
+    message.reply({ content: userFacingResolveError(error), allowedMentions: { parse: [], repliedUser: false } });
+    return;
+  }
+
+  try {
+    let queue = queues.get(guildId);
     const isFirstSong = !queue;
-    
     if (!queue) {
       queue = await ensureQueueAndConnection(message, targetVoiceChannel.id);
     }
-    console.log('Adding song to queue:', videoInfo.title);
-    
-    // Store the original YouTube URL instead of the direct audio URL
-    // We'll get a fresh audio URL when we actually play it
-    const queueItem = {
-      title: videoInfo.title,
-      url: url, // Store original YouTube URL
-      requestedBy: message.author.username
-    };
-    const hadCurrentSongBeforeAdd = !!queue.getCurrentSong();
-    queue.addSong(queueItem);
-    requestNextSongPrefetch(message);
-    
-    // If this is the current song (no other song playing), start playing immediately
-    if (!hadCurrentSongBeforeAdd && queue.getCurrentSong()?.url === queueItem.url) {
-      // Start playing immediately with fresh URL - no delay
-      playYouTubeUrl(queueItem.url, queue.getPlayer(), message, queueItem.title, isFirstSong);
-    } else {
-      await sendOrEditMusicMessage(message, `Added to queue: ${videoInfo.title}`);
+    const hadCurrentSong = !!queue.getCurrentSong();
+    enqueueTracks(queue, resolved.tracks, message.author.username, message, usageContext, isFirstSong);
+    if (resolved.name) {
+      const skippedNote = resolved.skipped ? ` (${resolved.skipped} ei saatavilla)` : '';
+      message.reply({ content: `Lisättiin ${resolved.tracks.length} kappaletta listalta ${resolved.name}${skippedNote}.`, allowedMentions: { parse: [], repliedUser: false } });
+      logUsage('playlist.added', { ...usageContext, addedCount: resolved.tracks.length, skipped: resolved.skipped });
+    } else if (hadCurrentSong) {
+      await sendOrEditMusicMessage(message, `Added to queue: ${resolved.tracks[0].title}`);
     }
   } catch (error) {
-    console.error(`[yt-fetch] play guild=${guildId} failed: ${formatYtDlpError(error)}`);
     console.error('Play command error:', error);
-    message.reply('Error playing the video!');
+    logUsage('play.failed', { ...usageContext, error });
+    message.reply('Eppu ei päässyt äänikanavalle.');
   }
 }
-async function handlePlaylist(message: Message, url: string, existingQueue?: MusicQueue, channelId?: string) {
-  try {
-    message.reply('Processing playlist. This may take a moment...');
-    
-    // Get playlist info
-    const playlistFetchStartedAt = Date.now();
-    console.log(`[yt-fetch] playlist begin url=${url}`);
-    const playlistFlags = buildYtDlpFlags({
-      dumpSingleJson: true,
-      flatPlaylist: true,
-      simulate: true,    // Don't download, just get info
-    });
-    
-    const playlistInfo = await runYtDlpJsonWithAutoCookieRefresh<any>(
-      url,
-      playlistFlags,
-      `playlist url=${url}`
-    );
-    console.log(
-      `[yt-fetch] playlist success url=${url} entries=${Array.isArray(playlistInfo?.entries) ? playlistInfo.entries.length : 0} `
-      + `in ${Date.now() - playlistFetchStartedAt}ms`
-    );
-    
-    if (!playlistInfo || !playlistInfo.entries || !Array.isArray(playlistInfo.entries)) {
-      throw new Error('Failed to get playlist information');
-    }
-    
-    const entries = playlistInfo.entries as PlaylistEntry[];
-    
-    if (entries.length === 0) {
-      message.reply('No videos found in the playlist.');
-      return;
-    }
-    
-    // Create queue if it doesn't exist
-    const guildId = message.guild!.id;
-    let queue = existingQueue || queues.get(guildId);
-    const isFirstSong = !queue;
-    
-    if (!queue) {
-      const targetChannelId = channelId || message.member?.voice.channel?.id;
-      console.log(
-        `[voice] Playlist queue creation target channel=${voiceChannelLabel(message, targetChannelId)} `
-        + `source=${channelId ? 'resolved-in-handlePlay' : 'member-voice'}`
-      );
-      if (!targetChannelId) {
-        message.reply('No voice channel available for playlist playback.');
-        return;
-      }
-      queue = await ensureQueueAndConnection(message, targetChannelId);
-    }
-    
-    // Process each video in the playlist
-    let addedCount = 0;
-    const totalVideos = entries.length;
-    
-    message.reply(`Found ${totalVideos} videos in the playlist. Adding to queue...`);
-    
-    // Add YouTube URLs to queue (we'll get fresh audio URLs when playing)
-    for (const entry of entries) {
-      try {
-        const entryFetchStartedAt = Date.now();
-        console.log(`[yt-fetch] playlist-entry begin url=${entry.url}`);
-        // Just get the title, store the YouTube URL for later
-        const videoFlags = buildYtDlpFlags({
-          dumpSingleJson: true,
-          simulate: true,
-        });
-        
-        const videoInfo = await runYtDlpJsonWithAutoCookieRefresh<ExtendedPayload>(
-          entry.url,
-          videoFlags,
-          `playlist-entry url=${entry.url}`
-        );
-        console.log(
-          `[yt-fetch] playlist-entry success url=${entry.url} title="${videoInfo.title || 'unknown'}" `
-          + `in ${Date.now() - entryFetchStartedAt}ms`
-        );
-        
-        if (videoInfo.title) {
-          const queueItem = {
-            title: videoInfo.title,
-            url: entry.url, // Store YouTube URL, not direct audio URL
-            requestedBy: message.author.username
-          };
-          
-          const hadCurrentSongBeforeAdd = !!queue.getCurrentSong();
-          queue.addSong(queueItem);
-          addedCount++;
-          
-          // Start playing the first song if it's the current song
-          if (!hadCurrentSongBeforeAdd && queue.getCurrentSong()?.url === queueItem.url) {
-            playYouTubeUrl(queueItem.url, queue.getPlayer(), message, queueItem.title, isFirstSong && addedCount === 1);
-          }
-        }
-      } catch (error) {
-        console.error(`[yt-fetch] playlist-entry failed url=${entry.url} error=${formatYtDlpError(error)}`);
-        console.error(`Error processing playlist video ${entry.url}:`, error);
-        // Continue with next video even if one fails
-      }
-    }
-    requestNextSongPrefetch(message);
-    
-    message.reply(`Successfully added ${addedCount} out of ${totalVideos} videos from the playlist to the queue.`);
-    
-  } catch (error) {
-    console.error(`[yt-fetch] playlist failed url=${url} error=${formatYtDlpError(error)}`);
-    console.error('Playlist processing error:', error);
-    message.reply('Error processing the playlist!');
-  }
-}
-async function createQueueAndConnection(message: Message, channelId: string): Promise<MusicQueue> {
-  console.log(
-    `[voice] Creating new voice connection guild=${message.guild?.name} (${message.guild?.id}) `
-    + `channel=${voiceChannelLabel(message, channelId)}`
-  );
-  const guildId = message.guild!.id;
-  
-  const connection = joinVoiceChannel({
-    channelId,
-    guildId: guildId,
-    adapterCreator: message.guild!.voiceAdapterCreator as DiscordGatewayAdapterCreator,
-  });
+const recoveryConnections = new WeakSet<VoiceConnection>();
+export function ensureVoiceConnectionRecovery(connection: VoiceConnection, guildId: string, guildName: string): void {
+  if (recoveryConnections.has(connection)) return;
+  recoveryConnections.add(connection);
   connection.on('stateChange', (oldState, newState) => {
     console.log(
-      `[voice] Connection state guild=${message.guild?.name} channel=${voiceChannelLabel(message, channelId)} `
+      `[voice] Connection state guild=${guildName} channel=${connection.joinConfig.channelId} `
       + `${oldState.status} -> ${newState.status}`
     );
-    if (newState.status === VoiceConnectionStatus.Disconnected) {
-      const disconnectedState = newState as unknown as { reason?: unknown; closeCode?: unknown };
-      console.warn(
-        `[voice] Disconnected details guild=${message.guild?.name} `
-        + `reason=${voiceDisconnectReasonLabel(disconnectedState.reason)} `
-        + `closeCode=${disconnectedState.closeCode !== undefined ? String(disconnectedState.closeCode) : 'n/a'} `
-        + `${queueStateSnapshot(guildId)}`
-      );
-    }
+  });
+  connection.on('error', error => {
+    console.error(`[voice] Connection error guild=${guildName} channel=${connection.joinConfig.channelId}:`, error);
   });
   connection.on(VoiceConnectionStatus.Disconnected, async (_oldState, newState) => {
     const disconnectedState = newState as unknown as { reason?: unknown; closeCode?: unknown };
@@ -1474,7 +1031,7 @@ async function createQueueAndConnection(message: Message, channelId: string): Pr
     const maxAttempts = reconnectAttemptLimit();
     const backoffBaseMs = reconnectBackoffBaseMs();
     console.warn(
-      `[voice] Connection disconnected guild=${message.guild?.name}, attempting reconnect `
+      `[voice] Connection disconnected guild=${guildName}, attempting reconnect `
       + `within ${reconnectWindowMs}ms reason=${voiceDisconnectReasonLabel(reason)} `
       + `closeCode=${closeCode ?? 'n/a'} maxAttempts=${maxAttempts} `
       + `| ${queueStateSnapshot(guildId)}`
@@ -1484,23 +1041,23 @@ async function createQueueAndConnection(message: Message, channelId: string): Pr
     if (reason === VoiceConnectionDisconnectReason.WebSocketClose && closeCode === 4014) {
       try {
         await entersState(connection, VoiceConnectionStatus.Connecting, reconnectWindowMs);
-        console.log(`[voice] 4014 disconnect transitioned to connecting guild=${message.guild?.name}`);
+        console.log(`[voice] 4014 disconnect transitioned to connecting guild=${guildName}`);
         return;
       } catch (error) {
-        console.warn(`[voice] 4014 reconnect window expired guild=${message.guild?.name}`, error);
+        console.warn(`[voice] 4014 reconnect window expired guild=${guildName}`, error);
       }
     }
 
     try {
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         if (connection.state.status === VoiceConnectionStatus.Destroyed) {
-          console.warn(`[voice] Connection already destroyed before rejoin attempt guild=${message.guild?.name}`);
+          console.warn(`[voice] Connection already destroyed before rejoin attempt guild=${guildName}`);
           return;
         }
 
         const accepted = connection.rejoin();
         console.warn(
-          `[voice] Rejoin attempt guild=${message.guild?.name} attempt=${attempt}/${maxAttempts} `
+          `[voice] Rejoin attempt guild=${guildName} attempt=${attempt}/${maxAttempts} `
           + `accepted=${accepted} internalAttempts=${connection.rejoinAttempts} `
           + `state=${connection.state.status}`
         );
@@ -1512,11 +1069,11 @@ async function createQueueAndConnection(message: Message, channelId: string): Pr
 
         try {
           await entersState(connection, VoiceConnectionStatus.Ready, reconnectWindowMs);
-          console.log(`[voice] Rejoin succeeded guild=${message.guild?.name} after attempt=${attempt}`);
+          console.log(`[voice] Rejoin succeeded guild=${guildName} after attempt=${attempt}`);
           return;
         } catch (error) {
           console.warn(
-            `[voice] Rejoin attempt failed guild=${message.guild?.name} attempt=${attempt} `
+            `[voice] Rejoin attempt failed guild=${guildName} attempt=${attempt} `
             + `state=${connection.state.status}`,
             error
           );
@@ -1524,11 +1081,11 @@ async function createQueueAndConnection(message: Message, channelId: string): Pr
         }
       }
     } catch (error) {
-      console.error(`[voice] Unexpected reconnect handler error guild=${message.guild?.name}`, error);
+      console.error(`[voice] Unexpected reconnect handler error guild=${guildName}`, error);
     }
 
     console.error(
-      `[voice] Reconnect exhausted guild=${message.guild?.name} connectionState=${connection.state.status} `
+      `[voice] Reconnect exhausted guild=${guildName} connectionState=${connection.state.status} `
       + `| ${queueStateSnapshot(guildId)}`
     );
     if (connection.state.status !== VoiceConnectionStatus.Destroyed) {
@@ -1536,7 +1093,7 @@ async function createQueueAndConnection(message: Message, channelId: string): Pr
       connection.destroy();
     }
     if (queues.has(guildId)) {
-      queues.delete(guildId);
+      dropQueue(guildId);
       hasRepliedToPlay.delete(guildId);
       lastBotMessages.delete(guildId);
       clearStartupTrace(guildId);
@@ -1544,12 +1101,21 @@ async function createQueueAndConnection(message: Message, channelId: string): Pr
       console.log(`Cleaned up queue and tracking for guild: ${guildId}`);
     }
   });
-  connection.on('error', error => {
-    console.error(
-      `[voice] Connection error guild=${message.guild?.name} channel=${voiceChannelLabel(message, channelId)}:`,
-      error
-    );
+}
+async function createQueueAndConnection(message: Message, channelId: string): Promise<MusicQueue> {
+  console.log(
+    `[voice] Creating new voice connection guild=${message.guild?.name} (${message.guild?.id}) `
+    + `channel=${voiceChannelLabel(message, channelId)}`
+  );
+  const guildId = message.guild!.id;
+
+  const connection = joinVoiceChannel({
+    channelId,
+    guildId: guildId,
+    adapterCreator: message.guild!.voiceAdapterCreator as DiscordGatewayAdapterCreator,
+    selfDeaf: false,
   });
+  ensureVoiceConnectionRecovery(connection, guildId, message.guild!.name);
   const player = createAudioPlayer();
   
   player.on('error', error => {
@@ -1595,6 +1161,7 @@ async function createQueueAndConnection(message: Message, channelId: string): Pr
     console.log(
       `[voice] Connection ready guild=${message.guild?.name} channel=${voiceChannelLabel(message, channelId)}`
     );
+    startDiscordVoiceReceiver(connection, guildId, message.client.user?.id);
   } catch (error) {
     console.error(
       `[voice] Connection did not become ready guild=${message.guild?.name} channel=${voiceChannelLabel(message, channelId)}`,
@@ -1608,7 +1175,7 @@ async function createQueueAndConnection(message: Message, channelId: string): Pr
       }
     }
     if (queues.get(guildId) === queue) {
-      queues.delete(guildId);
+      dropQueue(guildId);
     }
     clearStartupTrace(guildId);
     clearNextSongPrefetch(guildId);
@@ -1618,10 +1185,23 @@ async function createQueueAndConnection(message: Message, channelId: string): Pr
   }
   player.on(AudioPlayerStatus.Idle, () => {
     console.log(`[voice] Audio player entered idle guild=${message.guild?.name} | ${queueStateSnapshot(guildId)}`);
+    const finishedSong = queue.getCurrentSong();
+    logUsage('playback.idle', {
+      ...messageUsageContext(message, 'playback'),
+      title: finishedSong?.title ?? null,
+      url: finishedSong?.url ?? null,
+      ...queueUsageMetrics(queue),
+    });
     const nextSong = queue.getNextSong();
     if (nextSong) {
       console.log(`[voice] Advancing to next song guild=${message.guild?.name} title="${nextSong.title}"`);
-      playYouTubeUrl(nextSong.url, queue.getPlayer(), message, nextSong.title);
+      logUsage('playback.advance', {
+        ...messageUsageContext(message, 'playback'),
+        title: nextSong.title,
+        url: nextSong.url,
+        ...queueUsageMetrics(queue),
+      });
+      void playTrack(nextSong, queue.getPlayer(), message);
     } else {
       clearStartupTrace(guildId);
       clearNextSongPrefetch(guildId);
@@ -1641,45 +1221,17 @@ async function createQueueAndConnection(message: Message, channelId: string): Pr
   
   return queue;
 }
-function createFfmpegStream(url: string): Readable {
-  const ffmpeg = spawn('ffmpeg', [
-    '-reconnect', '1',
-    '-reconnect_streamed', '1',
-    '-reconnect_delay_max', '5',
-    '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    '-headers', 'Accept: */*',
-    '-headers', 'Accept-Language: en-US,en;q=0.9',
-    '-headers', 'Accept-Encoding: identity',
-    '-headers', 'Range: bytes=0-',
-    '-headers', 'Connection: keep-alive',
-    '-headers', 'Sec-Fetch-Dest: video',
-    '-headers', 'Sec-Fetch-Mode: no-cors',
-    '-headers', 'Sec-Fetch-Site: cross-site',
-    '-i', url,
-    '-analyzeduration', '0',
-    '-probesize', '32768',        // Minimize probe size to reduce memory usage
-    '-loglevel', ffmpegLogLevel(),
-    '-f', 's16le',
-    '-ar', '48000',
-    '-ac', '2',
-    '-acodec', 'pcm_s16le',
-    '-bufsize', '64k',         // Small buffer size to reduce memory usage
-    'pipe:1'
-  ]);
-  wireFfmpegDiagnostics(ffmpeg, 'direct-url');
-  // Handle process errors
-  ffmpeg.on('error', error => {
-    console.error('FFmpeg process error:', error);
-  });
-  // Handle stdout errors
-  const stdout = ffmpeg.stdout;
-  stdout.on('error', error => {
-    console.error('FFmpeg stdout error:', error);
-  });
-  return stdout;
-}
-function createYouTubeStream(youtubeUrl: string): Readable {
+function createTrackStream(track: QueueItem): Readable {
+  const youtubeUrl = track.url;
+  // The android client fallback only applies to YouTube itself.
+  const fallbackAllowed = track.source === 'youtube';
   const passthrough = new PassThrough();
+  const children: ChildProcessWithoutNullStreams[] = [];
+  passthrough.once('close', () => {
+    for (const child of children) {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    }
+  });
   let settled = false;
   let startedFallback = false;
 
@@ -1712,14 +1264,15 @@ function createYouTubeStream(youtubeUrl: string): Readable {
           '--quiet',
           '--no-warnings',
           '--no-progress',
-          youtubeUrl,
+          ...ytDlpStreamInput(track),
         ]);
     console.log(
       usingFallback
         ? `Piping yt-dlp -> ffmpeg with android fallback for: ${youtubeUrl}`
-        : `Piping yt-dlp -> ffmpeg for: ${youtubeUrl}`
+        : `Piping yt-dlp -> ffmpeg for: ${youtubeUrl} (source=${track.source})`
     );
     const ytdlp = spawn(YTDLP_BIN, ytdlpArgs);
+    children.push(ytdlp);
     const ffmpeg = spawn('ffmpeg', [
       '-re',
       '-i', 'pipe:0',
@@ -1733,6 +1286,7 @@ function createYouTubeStream(youtubeUrl: string): Readable {
       '-bufsize', '64k',
       'pipe:1'
     ]);
+    children.push(ffmpeg);
     let ytdlpStdoutBytes = 0;
     let ffmpegProducedOutput = false;
     let ytdlpExited = false;
@@ -1799,7 +1353,7 @@ function createYouTubeStream(youtubeUrl: string): Readable {
     ffmpeg.stdout.pipe(passthrough, { end: false });
 
     const maybeStartFallback = () => {
-      if (settled || usingFallback || startedFallback) return false;
+      if (settled || usingFallback || startedFallback || !fallbackAllowed) return false;
       startedFallback = true;
       console.warn(`[yt-dlp] Stream fallback engaged for ${youtubeUrl}`);
       if (!ffmpegExited && ffmpeg.exitCode === null) {
@@ -1847,8 +1401,15 @@ function createYouTubeStream(youtubeUrl: string): Readable {
       if (!ffmpegProducedOutput && maybeStartFallback()) {
         return;
       }
-      if (usingFallback && !ffmpegProducedOutput) {
-        finishWithError(new Error(`ffmpeg fallback failed for ${youtubeUrl}`));
+      // A fallback attempt that is running owns the output from here on.
+      if (startedFallback && !usingFallback) {
+        return;
+      }
+      // Nothing else will produce audio: end the track (or fail it) so the queue can advance.
+      if (ffmpegProducedOutput) {
+        finishSuccess();
+      } else {
+        finishWithError(new Error(`ffmpeg ${mode} failed for ${youtubeUrl}: ${stderrText.trim() || `exit ${code}`}`));
       }
     });
   };
@@ -1874,27 +1435,28 @@ function createPrefetchedFileStream(filePath: string): Readable {
   ffmpeg.on('error', error => {
     console.error('[prefetch] FFmpeg process error for prefetched file:', error);
   });
-  ffmpeg.on('exit', (code) => {
-    if (code !== 0) {
+  ffmpeg.on('exit', (code, signal) => {
+    if (code !== 0 && !signal) {
       console.error(`[prefetch] FFmpeg exited with code ${code} for prefetched file ${path.basename(filePath)}`);
     }
     removePrefetchFile(filePath);
   });
   const passthrough = new PassThrough();
   ffmpeg.stdout.pipe(passthrough);
+  passthrough.once('close', () => {
+    if (ffmpeg.exitCode === null && ffmpeg.signalCode === null) ffmpeg.kill('SIGKILL');
+  });
   return passthrough;
 }
-async function playPrefetchedSong(
-  prefetched: NextSongPrefetch,
-  player: AudioPlayer,
-  message: Message,
-  title: string,
-  isFirstSong: boolean = false
-) {
+/** Start playing a queue item, from the prefetched file when one is ready, else streaming live. */
+async function playTrack(track: QueueItem, player: AudioPlayer, message: Message, isFirstSong: boolean = false) {
+  const guildId = message.guild!.id;
+  const prefetched = takeReadyPrefetch(guildId, track.url);
+  const startupSource: StartupSource = prefetched ? 'prefetched' : 'live';
   try {
-    const trace = beginStartupTrace(message, title, prefetched.url, 'prefetched');
-    console.log(`[prefetch] Playing prefetched file guild=${message.guild?.name} title="${title}"`);
-    const baseStream = createPrefetchedFileStream(prefetched.filePath);
+    const trace = beginStartupTrace(message, track.title, track.url, startupSource);
+    console.log(`[playback] Starting ${startupSource} guild=${message.guild?.name} source=${track.source} title="${track.title}"`);
+    const baseStream = prefetched ? createPrefetchedFileStream(prefetched.filePath) : createTrackStream(track);
     baseStream.once('data', (chunk) => {
       if (!trace || trace.baseFirstChunkAt) return;
       trace.baseFirstChunkAt = Date.now();
@@ -1902,9 +1464,9 @@ async function playPrefetchedSong(
       logStartupTrace(trace, 'base-first-chunk', `bytes=${size}`);
     });
     baseStream.on('error', (error: Error & { code?: string }) => {
-      logStreamIssue('[prefetch] Stream issue while playing prefetched file', error);
+      logStreamIssue(`[playback] ${startupSource} stream issue`, error);
     });
-    const stream = await primePcmStream(baseStream, `prefetched:${title}`, {
+    const stream = await primePcmStream(baseStream, `${startupSource}:${track.title}`, {
       onFirstChunk: (bytes) => {
         logStartupTrace(trace, 'prime-first-chunk', `bytes=${bytes}`);
       },
@@ -1916,173 +1478,164 @@ async function playPrefetchedSong(
         logStartupTrace(trace, 'prime-ready', `bytes=${bytes}, reason=${reason}`);
       },
     });
-    logStartupTrace(trace, 'create-audio-resource');
-    const withInlineVolume = inlineVolumeEnabled();
-    const resource = createAudioResource(stream, {
-      inputType: StreamType.Raw,
-      inlineVolume: withInlineVolume
-    });
-    if (withInlineVolume) {
-      resource.volume?.setVolume(0.5);
+    const queue = queues.get(guildId);
+    if (queue?.getPlayer() !== player) {
+      // The queue was cleared (reset, disconnect) while this track was starting.
+      stream.destroy();
+      return;
     }
+    logStartupTrace(trace, 'create-audio-resource');
+    const resource = createPlaybackResource(stream, message);
     if (trace) {
       trace.playerPlayAt = Date.now();
     }
     logStartupTrace(trace, 'player.play()');
     player.play(resource);
+    if (queue.consumePendingSkip()) {
+      // Skip was pressed while the track was still starting; the Idle handler advances the queue.
+      console.log(`[playback] Skip requested during startup, skipping "${track.title}"`);
+      player.stop();
+      return;
+    }
+    logUsage('playback.started', {
+      ...messageUsageContext(message, 'playback'),
+      title: track.title,
+      url: track.url,
+      trackSource: track.source,
+      startupSource,
+    });
     markSongStarted(message);
-    await sendOrEditMusicMessage(message, `Now playing: ${title}`, isFirstSong);
+    await sendOrEditMusicMessage(message, `Now playing: ${track.title}`, isFirstSong);
     requestNextSongPrefetch(message);
   } catch (error) {
-    console.error('[prefetch] Failed to play prefetched file, falling back to live stream:', error);
-    removePrefetchFile(prefetched.filePath);
-    await playYouTubeUrlDirect(prefetched.url, player, message, title, isFirstSong);
-  }
-}
-async function playYouTubeUrlDirect(youtubeUrl: string, player: AudioPlayer, message: Message, title: string, isFirstSong: boolean = false) {
-  try {
-    const trace = beginStartupTrace(message, title, youtubeUrl, 'live');
-    console.log('Streaming directly from YouTube URL with FFmpeg:', youtubeUrl);
-    const baseStream = createYouTubeStream(youtubeUrl);
-    baseStream.once('data', (chunk) => {
-      if (!trace || trace.baseFirstChunkAt) return;
-      trace.baseFirstChunkAt = Date.now();
-      const size = Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(String(chunk));
-      logStartupTrace(trace, 'base-first-chunk', `bytes=${size}`);
+    console.error(`[playback] Failed to start ${startupSource} playback:`, error);
+    logUsage('playback.failed', {
+      ...messageUsageContext(message, 'playback'),
+      title: track.title,
+      url: track.url,
+      trackSource: track.source,
+      startupSource,
+      error,
     });
-    // Add error handling for the stream
-    baseStream.on('error', (error: Error & { code?: string }) => {
-      logStreamIssue('YouTube stream issue', error);
-    });
-    const stream = await primePcmStream(baseStream, title, {
-      onFirstChunk: (bytes) => {
-        logStartupTrace(trace, 'prime-first-chunk', `bytes=${bytes}`);
-      },
-      onPrimed: (bytes, reason) => {
-        if (!trace) return;
-        trace.primeReadyAt = Date.now();
-        trace.primeBytes = bytes;
-        trace.primeReason = reason;
-        logStartupTrace(trace, 'prime-ready', `bytes=${bytes}, reason=${reason}`);
-      },
-    });
-    logStartupTrace(trace, 'create-audio-resource');
-    const withInlineVolume = inlineVolumeEnabled();
-    const resource = createAudioResource(stream, {
-      inputType: StreamType.Raw,
-      inlineVolume: withInlineVolume
-    });
-    if (withInlineVolume) {
-      resource.volume?.setVolume(0.5);
+    if (prefetched) {
+      removePrefetchFile(prefetched.filePath);
+      await playTrack(track, player, message, isFirstSong);
+      return;
     }
-    if (trace) {
-      trace.playerPlayAt = Date.now();
-    }
-    logStartupTrace(trace, 'player.play()');
-    player.play(resource);
-    markSongStarted(message);
-    await sendOrEditMusicMessage(message, `Now playing: ${title}`, isFirstSong);
-    requestNextSongPrefetch(message);
-  } catch (error) {
-    console.error('Error in playYouTubeUrlDirect:', error);
-    (message.channel as any).send(`Failed to play: ${title}, skipping...`);
+    (message.channel as any).send({ content: `Failed to play: ${track.title}, skipping...`, allowedMentions: { parse: [] } });
     player.stop();
-  }
-}
-async function playYouTubeUrl(youtubeUrl: string, player: AudioPlayer, message: Message, title: string, isFirstSong: boolean = false) {
-  try {
-    const guildId = message.guild?.id;
-    if (guildId) {
-      const prefetched = takeReadyPrefetch(guildId, youtubeUrl);
-      if (prefetched) {
-        await playPrefetchedSong(prefetched, player, message, title, isFirstSong);
-        return;
-      }
-    }
-    console.log('Attempting to stream directly from YouTube URL:', youtubeUrl);
-    
-    // Try streaming directly from YouTube URL using youtube-dl in FFmpeg
-    await playYouTubeUrlDirect(youtubeUrl, player, message, title, isFirstSong);
-    
-  } catch (error) {
-    console.error('Error streaming YouTube URL:', error);
-    message.reply('Error streaming from YouTube');
-  }
-}
-async function playSong(url: string, player: AudioPlayer, message: Message, title: string, isFirstSong: boolean = false) {
-  try {
-    console.log('Creating FFmpeg stream for URL:', url);
-    console.log('URL length:', url.length);
-    console.log('URL starts with:', url.substring(0, 100));
-    console.log('FFmpeg starting at timestamp:', Date.now());
-    
-    const stream = createFfmpegStream(url);
-    
-    // Add error handling for the stream
-    stream.on('error', (error) => {
-      if (isExpectedStreamTeardownError(error)) {
-        console.log('Audio stream closed during skip/transition');
-        return;
-      }
-      console.error('Stream error:', error);
-      message.reply('Error with audio stream');
-    });
-    
-    const withInlineVolume = inlineVolumeEnabled();
-    const resource = createAudioResource(stream, {
-      inputType: StreamType.Raw,
-      inlineVolume: withInlineVolume
-    });
-    if (withInlineVolume) {
-      resource.volume?.setVolume(0.5); // Set volume to 50% to avoid distortion
-    }
-    player.play(resource);
-    
-    await sendOrEditMusicMessage(message, `Now playing: ${title}`, isFirstSong);
-  } catch (error) {
-    console.error('Error in playSong:', error);
-    message.reply('Error playing the audio');
   }
 }
 export function handlePause(message: Message) {
   const queue = queues.get(message.guild!.id);
+  const usageContext = {
+    ...messageUsageContext(message, 'discord'),
+    commandName: 'pause',
+  };
   if (!queue) {
+    logUsage('queue.pause', {
+      ...usageContext,
+      ok: false,
+      reason: 'no_queue',
+    });
     message.reply('No music is playing!');
     return;
   }
   if (queue.pause()) {
+    logUsage('queue.pause', {
+      ...usageContext,
+      ok: true,
+      ...queueUsageMetrics(queue),
+    });
     message.reply('Paused the music!');
   } else {
+    logUsage('queue.pause', {
+      ...usageContext,
+      ok: false,
+      reason: 'already_paused',
+      ...queueUsageMetrics(queue),
+    });
     message.reply('The music is already paused!');
   }
 }
 export function handleResume(message: Message) {
   const queue = queues.get(message.guild!.id);
+  const usageContext = {
+    ...messageUsageContext(message, 'discord'),
+    commandName: 'resume',
+  };
   if (!queue) {
+    logUsage('queue.resume', {
+      ...usageContext,
+      ok: false,
+      reason: 'no_queue',
+    });
     message.reply('No music is queued!');
     return;
   }
   if (queue.resume()) {
+    logUsage('queue.resume', {
+      ...usageContext,
+      ok: true,
+      ...queueUsageMetrics(queue),
+    });
     message.reply('Resumed the music!');
   } else {
+    logUsage('queue.resume', {
+      ...usageContext,
+      ok: false,
+      reason: 'already_playing',
+      ...queueUsageMetrics(queue),
+    });
     message.reply('The music is already playing!');
   }
 }
 export function handleSkip(message: Message) {
   const queue = queues.get(message.guild!.id);
+  const usageContext = {
+    ...messageUsageContext(message, 'discord'),
+    commandName: 'skip',
+  };
   if (!queue) {
+    logUsage('queue.skip', {
+      ...usageContext,
+      ok: false,
+      reason: 'no_queue',
+    });
     message.reply('No music is playing!');
     return;
   }
+  const skippedSong = queue.getCurrentSong();
   queue.skip();
+  logUsage('queue.skip', {
+    ...usageContext,
+    ok: true,
+    skippedTitle: skippedSong?.title ?? null,
+    skippedUrl: skippedSong?.url ?? null,
+    ...queueUsageMetrics(queue),
+  });
   message.reply('Skipped the current song!');
 }
 export function handleQueue(message: Message) {
   const queue = queues.get(message.guild!.id);
+  const usageContext = {
+    ...messageUsageContext(message, 'discord'),
+    commandName: 'queue',
+  };
   if (!queue) {
+    logUsage('queue.view', {
+      ...usageContext,
+      ok: false,
+      reason: 'no_queue',
+    });
     message.reply('No music is queued!');
     return;
   }
+  logUsage('queue.view', {
+    ...usageContext,
+    ok: true,
+    ...queueUsageMetrics(queue),
+  });
   const currentSong = queue.getCurrentSong();
   const queueList = queue.getQueue();
   let response = 'Music Queue:\n';
@@ -2096,15 +1649,19 @@ export function handleQueue(message: Message) {
       .map((song, index) => `${index + 1}. ${song.title} (requested by ${song.requestedBy})`)
       .join('\n');
   }
-  message.reply(response);
+  message.reply({ content: response, allowedMentions: { parse: [], repliedUser: false } });
 }
 export function handleHelp(message: Message) {
+  logUsage('help.view', {
+    ...messageUsageContext(message, 'discord'),
+    commandName: 'help',
+  });
   const embed = new EmbedBuilder()
     .setColor(0x0099ff)
     .setTitle('🎵 Music Bot Commands')
     .setDescription('Here are all the available commands:')
     .addFields(
-      { name: '/play url:<youtube_url>', value: 'Play a YouTube video or playlist', inline: false },
+      { name: '/play url:<linkki tai hakusana>', value: 'YouTube, SoundCloud or Spotify link (track, playlist, album), or search text', inline: false },
       { name: '/pause', value: 'Pause the current song', inline: true },
       { name: '/resume', value: 'Resume the paused song', inline: true },
       { name: '/skip', value: 'Skip the current song', inline: true },
@@ -2119,21 +1676,42 @@ export function handleHelp(message: Message) {
   message.reply({ embeds: [embed] });
 }
 export function handleCleanup(message: Message) {
+  const usageContext = {
+    ...messageUsageContext(message, 'discord'),
+    commandName: 'cleanup',
+  };
   if (!message.member?.permissions.has('Administrator')) {
+    logUsage('cleanup.rejected', {
+      ...usageContext,
+      reason: 'missing_admin_permission',
+    });
     message.reply('You need administrator permissions to use this command!');
     return;
   }
   try {
     message.reply('Running cleanup...');
     checkAndLeaveIfNeeded(message.client);
+    logUsage('cleanup.requested', usageContext);
     message.reply('Cleanup completed! Check console for details.');
   } catch (error) {
     console.error('Cleanup command error:', error);
+    logUsage('cleanup.failed', {
+      ...usageContext,
+      error,
+    });
     message.reply('Error during cleanup!');
   }
 }
 export function handleNukkumaan(message: Message) {
+  const usageContext = {
+    ...messageUsageContext(message, 'discord'),
+    commandName: 'nukkumaan',
+  };
   if (!message.member?.permissions.has('Administrator')) {
+    logUsage('reset.rejected', {
+      ...usageContext,
+      reason: 'missing_admin_permission',
+    });
     message.reply('You need administrator permissions to use this command!');
     return;
   }
@@ -2143,9 +1721,12 @@ export function handleNukkumaan(message: Message) {
       const queue = queues.get(guild.id);
       if (queue) {
         // Stop the player and clear the queue
-        const player = queue.getPlayer();
-        player.stop();
-        queues.delete(guild.id);
+        dropQueue(guild.id);
+        logUsage('reset.queue_cleared', {
+          ...usageContext,
+          guildId: guild.id,
+          guildName: guild.name,
+        });
       }
       clearStartupTrace(guild.id);
       clearNextSongPrefetch(guild.id);
@@ -2157,6 +1738,12 @@ export function handleNukkumaan(message: Message) {
         if (connection) {
           connection.destroy();
           console.log(`Destroyed connection in guild: ${guild.name}`);
+          logUsage('voice.connection_destroyed', {
+            ...usageContext,
+            guildId: guild.id,
+            guildName: guild.name,
+            reason: 'reset',
+          });
         }
         me.voice.disconnect();
         console.log(`Left voice channel in guild: ${guild.name}`);
@@ -2166,9 +1753,14 @@ export function handleNukkumaan(message: Message) {
       hasRepliedToPlay.delete(guild.id);
       lastBotMessages.delete(guild.id);
     });
+    logUsage('reset.completed', usageContext);
     message.reply('Bot has been reset and disconnected from all voice channels!');
   } catch (error) {
     console.error('Reset command error:', error);
+    logUsage('reset.failed', {
+      ...usageContext,
+      error,
+    });
     message.reply('Error during reset!');
   }
 }
@@ -2177,9 +1769,16 @@ function checkAndLeaveChannel(guildId: string, client: Client): boolean {
   if (!guild) {
     console.log(`Guild ${guildId} not found, cleaning up...`);
     const hadTracking = hasGuildTrackingState(guildId);
+    if (hadTracking) {
+      logUsage('voice.cleanup', {
+        source: 'periodic_cleanup',
+        guildId,
+        reason: 'guild_not_found',
+      });
+    }
     // Clean up even if guild not found
     if (queues.has(guildId)) {
-      queues.delete(guildId);
+      dropQueue(guildId);
       hasRepliedToPlay.delete(guildId);
       lastBotMessages.delete(guildId);
     }
@@ -2193,9 +1792,17 @@ function checkAndLeaveChannel(guildId: string, client: Client): boolean {
   if (!channel) {
     console.log(`Bot not in voice channel in ${guild.name}, cleaning up...`);
     const hadTracking = hasGuildTrackingState(guildId);
+    if (hadTracking) {
+      logUsage('voice.cleanup', {
+        source: 'periodic_cleanup',
+        guildId,
+        guildName: guild.name,
+        reason: 'bot_not_in_voice_channel',
+      });
+    }
     // Clean up if not in voice channel
     if (queues.has(guildId)) {
-      queues.delete(guildId);
+      dropQueue(guildId);
       hasRepliedToPlay.delete(guildId);
       lastBotMessages.delete(guildId);
     }
@@ -2233,6 +1840,24 @@ function checkAndLeaveChannel(guildId: string, client: Client): boolean {
     + `queueIdle=${isIdle} ${queueStateSnapshot(guildId)}`
   );
   // Leave if bot is alone OR if no music is playing and queue is empty
+  // A receiver must stay connected even between songs or while its channel is empty.
+  if (connection && isDiscordVoiceListener(connection)) {
+    if (shouldLeaveBecauseAlone || shouldLeaveBecauseNoPlayback) {
+      dropQueue(guildId);
+      clearStartupTrace(guildId);
+      clearNextSongPrefetch(guildId);
+      hasRepliedToPlay.delete(guildId);
+      lastBotMessages.delete(guildId);
+      const defaultChannelId = process.env.DEFAULT_VOICE_CHANNEL_ID?.trim();
+      const defaultChannel = defaultChannelId ? guild.channels.cache.get(defaultChannelId) : null;
+      if (defaultChannel?.isVoiceBased() && connection.joinConfig.channelId !== defaultChannel.id) {
+        console.log(`[voice-cleanup] Returning voice listener to default channel in ${guild.name}`);
+        connection.rejoin({ channelId: defaultChannel.id, selfDeaf: false, selfMute: connection.joinConfig.selfMute });
+      }
+    }
+    console.log(`[voice-cleanup] Keeping voice listener for ${guild.name}`);
+    return false;
+  }
   if (shouldLeaveBecauseAlone || shouldLeaveBecauseNoPlayback) {
     const leaveReason = shouldLeaveBecauseAlone ? 'alone' : 'no music playing';
     console.log(`[voice-cleanup] Leaving voice channel in ${guild.name}: ${leaveReason}`);
@@ -2241,6 +1866,14 @@ function checkAndLeaveChannel(guildId: string, client: Client): boolean {
       try {
         connection.destroy();
         console.log(`[voice-cleanup] Destroyed voice connection for ${guild.name}`);
+        logUsage('voice.connection_destroyed', {
+          source: 'periodic_cleanup',
+          guildId,
+          guildName: guild.name,
+          channelId: channel.id,
+          channelName: channel.name,
+          reason: leaveReason,
+        });
       } catch (error) {
         console.error(`[voice-cleanup] Error destroying connection for ${guild.name}:`, error);
       }
@@ -2254,10 +1887,20 @@ function checkAndLeaveChannel(guildId: string, client: Client): boolean {
       } catch (error) {
         console.error(`[voice-cleanup] Error stopping player for ${guild.name}:`, error);
       }
-      queues.delete(guildId);
+      dropQueue(guildId);
     }
     clearStartupTrace(guildId);
     clearNextSongPrefetch(guildId);
+    logUsage('voice.cleanup', {
+      source: 'periodic_cleanup',
+      guildId,
+      guildName: guild.name,
+      channelId: channel.id,
+      channelName: channel.name,
+      reason: leaveReason,
+      humans: humanMembers,
+      ...queueUsageMetrics(queue),
+    });
     
     // Reset tracking for this guild
     hasRepliedToPlay.delete(guildId);
