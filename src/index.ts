@@ -3,9 +3,6 @@ import { config } from 'dotenv';
 import { handlePlay, handlePause, handleResume, handleSkip, handleQueue, handleNukkumaan, handleHelp, handleCleanup, checkAndLeaveIfNeeded } from './commands/play';
 import { startWebServer } from './web/server';
 import { createDiscordLoginLink } from './web/auth';
-import { DEFAULT_VOICE_KEYWORDS, executeVoiceCommand } from './voice/commandExecutor';
-import { setDiscordVoiceCommandHandler, startDefaultDiscordVoiceReceiver } from './voice/discordVoiceRuntime';
-import { loadVoiceKeywordMap } from './web/voiceKeywords';
 import { flushUsageLog, logUsage, type UsageLogFields } from './usageLog';
 
 config();
@@ -340,55 +337,6 @@ client.once(Events.ClientReady, async () => {
     });
   }
 
-  setDiscordVoiceCommandHandler(async ({ guildId, userId, transcript }) => {
-    const startedAt = Date.now();
-    let voiceKeywordMap = DEFAULT_VOICE_KEYWORDS;
-    try {
-      voiceKeywordMap = { ...DEFAULT_VOICE_KEYWORDS, ...await loadVoiceKeywordMap() };
-    } catch (error) {
-      console.error('[discord-voice] Failed to load persisted voice keywords, using defaults:', error);
-    }
-
-    const user = await client.users.fetch(userId).catch(() => null);
-    const requestedBy = user?.globalName || user?.username || `Discord Voice ${userId}`;
-    try {
-      const result = await executeVoiceCommand(client, guildId, requestedBy, transcript, voiceKeywordMap);
-      console.log(
-        `[discord-voice] command guild=${guildId} user=${userId} intent=${result.intent} `
-        + `ok=${result.ok} status=${result.status} message="${result.message}" `
-        + `${result.resolvedUrl ? `url=${result.resolvedUrl}` : ''}`
-      );
-      logUsage('voice.command', {
-        source: 'discord_voice',
-        guildId,
-        userId,
-        username: requestedBy,
-        transcript,
-        intent: result.intent,
-        ok: result.ok,
-        status: result.status,
-        message: result.message,
-        queuedTitle: result.queuedTitle,
-        resolvedUrl: result.resolvedUrl,
-        durationMs: Date.now() - startedAt,
-      });
-    } catch (error) {
-      logUsage('voice.command', {
-        source: 'discord_voice',
-        guildId,
-        userId,
-        username: requestedBy,
-        transcript,
-        ok: false,
-        error,
-        durationMs: Date.now() - startedAt,
-      });
-      throw error;
-    }
-  });
-
-  await startDefaultDiscordVoiceReceiver(client);
-  
   // Start web UI server
   startWebServer(client);
   

@@ -4,21 +4,19 @@ Last updated: 2026-03-03
 
 ## Product Direction
 
-Build the best possible Raspberry Pi frontend experience first, then add controlled internet access, then layer voice and AI features.
+Build the best possible Raspberry Pi frontend experience first, then add controlled internet access, then add AI features.
 
 ## Ranked Priorities
 
 1. Pi-first frontend rebuild
 2. Controlled internet access (ngrok/Cloudflare Tunnel)
-3. Wake word + voice control
-4. Suno AI auto-song generation
+3. Suno AI auto-song generation
 
 ## Why This Order
 
 1. Frontend quality and performance on constrained hardware is the foundation for everything else.
 2. Internet exposure should be deliberate and hardened after core UX is stable.
-3. Wake-word control depends on stable control APIs and clear playback state handling.
-4. Suno integration has the highest complexity (product flow, quota/cost, policy handling) and is not critical for core control UX.
+3. Suno integration has the highest complexity (product flow, quota/cost, policy handling) and is not critical for core control UX.
 
 ## Milestone 1: Frontend Rebuild (Pi-First)
 
@@ -36,8 +34,7 @@ Deliver a fast, polished, mobile-friendly web UI that runs well on Raspberry Pi.
 ### Non-Goals
 
 1. Internet exposure setup and security hardening.
-2. Voice wake-word pipeline.
-3. Suno generation flow.
+2. Suno generation flow.
 
 ### Acceptance Criteria
 
@@ -66,14 +63,7 @@ Deliver a fast, polished, mobile-friendly web UI that runs well on Raspberry Pi.
 3. Add explicit warning, rate limits, and auth gate for exposed mode.
 4. Define safe defaults for exposed deployments (headers, origin policy, request limits).
 
-## Milestone 3: Wake Word + Voice Control
-
-1. Evaluate wake-word engines for Pi (accuracy vs CPU usage).
-2. Define command grammar (play/pause/skip/volume/queue).
-3. Implement local speech pipeline and fallback behavior.
-4. Add observability for false positives/negatives.
-
-## Milestone 4: Suno AI Auto-Song
+## Milestone 3: Suno AI Auto-Song
 
 1. Define user flow (prompt -> generate -> queue).
 2. Validate API limits/cost controls and moderation boundaries.
