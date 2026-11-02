@@ -30,7 +30,6 @@ import { spawn, ChildProcessWithoutNullStreams, execSync } from 'child_process';
 import { Readable, PassThrough } from 'stream';
 import fs from 'fs';
 import { createHash } from 'crypto';
-import { isDiscordVoiceListener, startDiscordVoiceReceiver } from '../voice/discordVoiceRuntime';
 import { logUsage, type UsageLogFields } from '../usageLog';
 interface NextSongPrefetch {
   guildId: string;
@@ -670,7 +669,7 @@ function enqueueTracks(
 }
 
 /**
- * Queue songs from the web UI (or voice commands). Pass `tracks` when they are already known
+ * Queue songs from the web UI. Pass `tracks` when they are already known
  * (search results, saved playlists) to skip resolution; otherwise `input` is resolved as a link or search text.
  */
 export async function enqueueFromWeb(
@@ -1113,7 +1112,7 @@ async function createQueueAndConnection(message: Message, channelId: string): Pr
     channelId,
     guildId: guildId,
     adapterCreator: message.guild!.voiceAdapterCreator as DiscordGatewayAdapterCreator,
-    selfDeaf: false,
+    selfDeaf: true,
   });
   ensureVoiceConnectionRecovery(connection, guildId, message.guild!.name);
   const player = createAudioPlayer();
@@ -1161,7 +1160,6 @@ async function createQueueAndConnection(message: Message, channelId: string): Pr
     console.log(
       `[voice] Connection ready guild=${message.guild?.name} channel=${voiceChannelLabel(message, channelId)}`
     );
-    startDiscordVoiceReceiver(connection, guildId, message.client.user?.id);
   } catch (error) {
     console.error(
       `[voice] Connection did not become ready guild=${message.guild?.name} channel=${voiceChannelLabel(message, channelId)}`,
@@ -1840,24 +1838,6 @@ function checkAndLeaveChannel(guildId: string, client: Client): boolean {
     + `queueIdle=${isIdle} ${queueStateSnapshot(guildId)}`
   );
   // Leave if bot is alone OR if no music is playing and queue is empty
-  // A receiver must stay connected even between songs or while its channel is empty.
-  if (connection && isDiscordVoiceListener(connection)) {
-    if (shouldLeaveBecauseAlone || shouldLeaveBecauseNoPlayback) {
-      dropQueue(guildId);
-      clearStartupTrace(guildId);
-      clearNextSongPrefetch(guildId);
-      hasRepliedToPlay.delete(guildId);
-      lastBotMessages.delete(guildId);
-      const defaultChannelId = process.env.DEFAULT_VOICE_CHANNEL_ID?.trim();
-      const defaultChannel = defaultChannelId ? guild.channels.cache.get(defaultChannelId) : null;
-      if (defaultChannel?.isVoiceBased() && connection.joinConfig.channelId !== defaultChannel.id) {
-        console.log(`[voice-cleanup] Returning voice listener to default channel in ${guild.name}`);
-        connection.rejoin({ channelId: defaultChannel.id, selfDeaf: false, selfMute: connection.joinConfig.selfMute });
-      }
-    }
-    console.log(`[voice-cleanup] Keeping voice listener for ${guild.name}`);
-    return false;
-  }
   if (shouldLeaveBecauseAlone || shouldLeaveBecauseNoPlayback) {
     const leaveReason = shouldLeaveBecauseAlone ? 'alone' : 'no music playing';
     console.log(`[voice-cleanup] Leaving voice channel in ${guild.name}: ${leaveReason}`);

@@ -6,7 +6,6 @@ import { Client } from 'discord.js';
 import { queues, enqueueFromWeb, getPlaybackPositionMs, getVolume, refreshNextSongPrefetch, setVolume } from '../commands/play';
 import { classifyInput, extractYouTubeVideoId, ResolveError, resolveInput, searchTracks, youtubeTrack, type Track } from '../music/sources';
 import type { QueueItem } from '../music/queue';
-import { DEFAULT_VOICE_KEYWORDS, executeVoiceCommand } from '../voice/commandExecutor';
 import { consumeDiscordLoginLink, getSessionFromCookie, logoutSessionFromCookie } from './auth';
 import {
   addSongsToPlaylist,
@@ -22,12 +21,6 @@ import {
   removePlaylistSong,
   renamePlaylist,
 } from './playlists';
-import {
-  deleteVoiceKeyword,
-  listVoiceKeywords,
-  loadVoiceKeywordMap,
-  upsertVoiceKeyword,
-} from './voiceKeywords';
 import { logUsage, type UsageLogFields } from '../usageLog';
 
 const HTML_PATH = path.join(__dirname, '../../src/web/index.html');
@@ -97,29 +90,6 @@ function parseAllowedOrigins(value: string | undefined): Set<string> {
       .map(origin => origin.trim())
       .filter(Boolean)
   );
-}
-
-function normalizeVoiceKeyword(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, ' ');
-}
-
-function parseVoiceKeywordConfig(value: string | undefined): Record<string, string> {
-  if (!value) return {};
-  const entries = value
-    .split(',')
-    .map((row) => row.trim())
-    .filter(Boolean);
-
-  const out: Record<string, string> = {};
-  for (const entry of entries) {
-    const sep = entry.indexOf('=');
-    if (sep <= 0) continue;
-    const key = normalizeVoiceKeyword(entry.slice(0, sep));
-    const url = entry.slice(sep + 1).trim();
-    if (!key || !url) continue;
-    out[key] = url;
-  }
-  return out;
 }
 
 function getRequestOrigin(req: http.IncomingMessage): string | null {
@@ -558,11 +528,6 @@ export function startWebServer(client: Client) {
   const rateLimitPerMinute = Math.max(10, Number.parseInt(process.env.WEB_RATE_LIMIT_PER_MIN || '180', 10) || 180);
   const allowedOrigins = parseAllowedOrigins(process.env.WEB_ALLOWED_ORIGINS);
   const defaultGuildId = process.env.WEB_DEFAULT_GUILD_ID?.trim() || process.env.DISCORD_GUILD_ID?.trim() || null;
-  const baseVoiceKeywordMap = {
-    ...DEFAULT_VOICE_KEYWORDS,
-    ...parseVoiceKeywordConfig(process.env.WEB_VOICE_KEYWORDS),
-  };
-
   const staticAssets = new Map<string, StaticAsset>([
     ['/', loadStaticAsset(HTML_PATH, 'text/html; charset=utf-8')],
     ['/index.html', loadStaticAsset(HTML_PATH, 'text/html; charset=utf-8')],
@@ -968,61 +933,6 @@ export function startWebServer(client: Client) {
         }
       }
 
-      if (pathname.startsWith('/api/voice-keywords')) {
-        const actor = readActorName(session, localMode);
-        const parts = pathname.split('/').filter(Boolean);
-        try {
-          if (parts.length === 2 && method === 'GET') {
-            const query = requestUrl.searchParams.get('query') || '';
-            const cursor = requestUrl.searchParams.get('cursor');
-            const limit = asNumber(requestUrl.searchParams.get('limit'), 30, 1, 100);
-            const result = await listVoiceKeywords(query, cursor, limit);
-            json(res, { ok: true, items: result.items, nextCursor: result.nextCursor });
-            return;
-          }
-
-          if (parts.length === 2 && method === 'PUT') {
-            const body = JSON.parse(await readBody(req));
-            const phrase = toOptionalString(body?.phrase);
-            const url = toOptionalString(body?.url);
-            if (!phrase) {
-              json(res, { error: 'phrase required' }, 400);
-              return;
-            }
-            if (!url) {
-              json(res, { error: 'url required' }, 400);
-              return;
-            }
-            const saved = await upsertVoiceKeyword(phrase, url, actor);
-            console.log(`[voice-keyword] upsert phrase="${saved.phrase}" by="${actor}"`);
-            json(res, { ok: true, item: saved });
-            return;
-          }
-
-          if (parts.length === 3 && method === 'DELETE') {
-            const phrase = decodeURIComponent(parts[2] || '');
-            if (!phrase.trim()) {
-              json(res, { error: 'phrase required' }, 400);
-              return;
-            }
-            const removed = await deleteVoiceKeyword(phrase);
-            if (!removed) {
-              json(res, { error: 'Keyword not found' }, 404);
-              return;
-            }
-            console.log(`[voice-keyword] delete phrase="${phrase}" by="${actor}"`);
-            json(res, { ok: true });
-            return;
-          }
-        } catch (error) {
-          const message = (error as { message?: string } | null)?.message || 'Voice keyword operation failed';
-          json(res, { error: message }, 400);
-          return;
-        }
-        json(res, { error: 'Not found' }, 404);
-        return;
-      }
-
       if (pathname === '/api/auth/me' && method === 'GET') {
         if (localMode) {
           json(res, { email: null, name: 'Local Mode', isAdmin: false, localMode: true, guildId: defaultGuildId });
@@ -1092,75 +1002,6 @@ export function startWebServer(client: Client) {
 
       if (method === 'POST' && pathname.startsWith('/api/')) {
         const body = JSON.parse(await readBody(req));
-        if (pathname === '/api/voice-command') {
-          const transcript = toOptionalString(body?.transcript);
-          if (!transcript) {
-            json(res, { error: 'transcript required' }, 400);
-            return;
-          }
-          const guildAccess = resolveAuthorizedGuildId(
-            toOptionalString(body?.guildId),
-            session?.guildId ?? null,
-            localMode,
-            defaultGuildId
-          );
-          if (guildAccess.error) {
-            json(res, { error: guildAccess.error }, guildAccess.status || 403);
-            return;
-          }
-          const guildId = guildAccess.guildId;
-          if (!guildId) {
-            json(res, { error: 'guildId required' }, 400);
-            return;
-          }
-
-          const requestedBy = session?.name || 'Web Voice Debug';
-          console.log(`[voice-cmd] begin guild=${guildId} by="${requestedBy}" transcript="${transcript}"`);
-          const startedAt = Date.now();
-          let voiceKeywordMap = baseVoiceKeywordMap;
-          try {
-            const persistedMap = await loadVoiceKeywordMap();
-            voiceKeywordMap = { ...baseVoiceKeywordMap, ...persistedMap };
-          } catch (error) {
-            console.error('[voice-cmd] failed to load persisted keywords, using base map:', error);
-          }
-          const result = await executeVoiceCommand(client, guildId, requestedBy, transcript, voiceKeywordMap);
-          console.log(
-            `[voice-cmd] done guild=${guildId} intent=${result.intent} ok=${result.ok} `
-            + `status=${result.status} in ${Date.now() - startedAt}ms `
-            + `${result.resolvedUrl ? `url=${result.resolvedUrl}` : ''}`
-          );
-          logUsage('voice.command', {
-            ...webUsageContext(req, session, localMode, trustProxy, guildId),
-            source: 'web_voice_debug',
-            transcript,
-            intent: result.intent,
-            ok: result.ok,
-            status: result.status,
-            message: result.message,
-            queuedTitle: result.queuedTitle,
-            resolvedUrl: result.resolvedUrl,
-            durationMs: Date.now() - startedAt,
-          });
-          if (!result.ok) {
-            json(
-              res,
-              { error: result.error || result.message, message: result.message, intent: result.intent, transcript },
-              result.status
-            );
-            return;
-          }
-          json(res, {
-            ok: true,
-            message: result.message,
-            intent: result.intent,
-            queuedTitle: result.queuedTitle,
-            resolvedUrl: result.resolvedUrl,
-            transcript,
-          });
-          return;
-        }
-
         if (pathname === '/api/search') {
           const query = typeof body.query === 'string' ? body.query.trim() : '';
           const source = body.source === 'soundcloud' ? 'soundcloud' : 'youtube';
@@ -1367,6 +1208,5 @@ export function startWebServer(client: Client) {
       }
     }
     console.log(`Session cookie secure flag: ${secureCookie ? 'enabled' : 'disabled'}`);
-    console.log(`Voice keywords (base): ${Object.keys(baseVoiceKeywordMap).sort().join(', ') || '(none)'}`);
   });
 }

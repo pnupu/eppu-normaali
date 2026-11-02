@@ -13,6 +13,13 @@ A Discord music bot with a web jukebox for playing YouTube, SoundCloud and Spoti
 - YouTube cookie support for age-restricted content
 - Auto-disconnect from empty channels
 
+## Archived speech commands
+
+Speech recognition, wake words, spoken commands, keyword presets, and training tools are preserved on
+[`archive/voice-commands-2026-11-02`](https://github.com/pnupu/eppu-normaali/tree/archive/voice-commands-2026-11-02)
+at commit `3de9f120a7be865abb80d87a161892a3f3906699`. They are not part of main.
+Discord voice-channel music playback remains supported.
+
 ## Requirements
 
 - Node.js
